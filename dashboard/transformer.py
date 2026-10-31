@@ -90,7 +90,7 @@ def influence_chart(influence):
 
 
 st.title("Gradient Boosting vs Deep Learning")
-st.caption("PatchTST is a transformer implemented from the paper in PyTorch and trained from scratch on this data. It is compared with the LightGBM model and with Chronos-Bolt, Amazon's pretrained time series model, used without any training. Every model sees demand up to 08:00 the day before plus tomorrow's weather and calendar, gets the same conformal calibration, and is scored on the same test days (1 September 2025 to 31 August 2026, clock change days skipped).")
+st.caption("LightGBM, the gradient boosting model in production, against three kinds of deep learning model: PatchTST, a transformer implemented in PyTorch and trained from scratch on this data, Chronos-Bolt and Chronos-2, Amazon's pretrained time series models, used without training, and Chronos-2 fine tuned on this data. Every model sees demand up to 08:00 the day before plus tomorrow's weather and calendar (except the demand only versions), gets the same conformal calibration, and is scored on the same test days (1 September 2025 to 31 August 2026, clock change days skipped).")
 
 forecasts = load_optional("transformer_forecasts")
 if forecasts is None:
@@ -99,7 +99,7 @@ if forecasts is None:
 forecasts = forecasts.set_axis(forecasts.index.tz_localize("UTC").tz_convert("Europe/London").tz_localize(None))
 
 st.dataframe(scores(forecasts))
-st.caption("Lower error is better, and a well calibrated 80% range contains about 80% of actual values. The transformer beats the pretrained model but not LightGBM, so LightGBM stays in production.")
+st.caption("Lower error is better, and a well calibrated 80% range contains about 80% of actual values. Fine tuned Chronos-2 is the only single model that beats LightGBM, and a blend of LightGBM, PatchTST and fine tuned Chronos-2 does better still (4.36% MAPE). LightGBM stays in production until the blend passes a live shadow test.")
 
 ensemble = load_optional("ensemble_weights")
 if ensemble is not None:
