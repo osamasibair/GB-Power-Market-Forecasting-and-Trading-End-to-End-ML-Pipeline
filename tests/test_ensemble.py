@@ -2,7 +2,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ensemble import best_weight, blend, mix, three_way_table, weight_table, weights
+from ensemble import (
+    all_blends,
+    best_weight,
+    blend,
+    mix,
+    three_way_table,
+    weight_table,
+    weights,
+)
 
 
 def make_frame(rows=480, seed=0, lightgbm_noise=400, patchtst_noise=400):
@@ -68,3 +76,16 @@ def test_three_way_weights_add_up_to_one_and_cover_each_model_alone():
     total = table["lightgbm_weight"] + table["patchtst_weight"] + table["third_weight"]
     assert np.allclose(total, 1) and len(table) == 231
     assert (table["third_weight"] == 1).sum() == 1 and (table["lightgbm_weight"] == 1).sum() == 1
+
+
+def test_every_blend_is_searched_and_sorted_by_the_calibration_year():
+    calib, test = make_frame(seed=1), make_frame(seed=2)
+    table = all_blends(calib, test, ["lightgbm", "patchtst"], steps=4)
+    assert len(table) == 5 and np.allclose(table["lightgbm"] + table["patchtst"], 1)
+    assert table["calibration_mape"].is_monotonic_increasing
+    for frame in (calib, test):
+        frame["chronos2_finetuned"] = frame["actual"] + 300
+        frame["chronos2_finetuned_low"] = frame["chronos2_finetuned"] - 600
+        frame["chronos2_finetuned_high"] = frame["chronos2_finetuned"] + 600
+    three = all_blends(calib, test, ["lightgbm", "patchtst", "chronos2_finetuned"])
+    assert len(three) == 231 and np.allclose(three[["lightgbm", "patchtst", "chronos2_finetuned"]].sum(axis=1), 1)

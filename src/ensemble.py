@@ -1,5 +1,6 @@
 """Blend the LightGBM and PatchTST forecasts, choosing the blend weight on the calibration year and scoring it on the test year."""
 import argparse
+import itertools
 
 import numpy as np
 import pandas as pd
@@ -63,6 +64,17 @@ def three_way_table(calib, test, third):
     return pd.DataFrame(rows)
 
 
+def all_blends(calib, test, models, steps=20):
+    """Every blend of `models` with weights in steps of 1/`steps` that add up to 1, each scored like the others."""
+    rows = []
+    for parts in itertools.product(range(steps + 1), repeat=len(models) - 1):
+        if sum(parts) > steps:
+            continue
+        shares = dict(zip(models, [part / steps for part in parts] + [(steps - sum(parts)) / steps]))
+        rows.append({**shares, **score(calib, test, {model: w for model, w in shares.items() if w > 0})})
+    return pd.DataFrame(rows).sort_values("calibration_mape", ignore_index=True)
+
+
 def best_weight(table):
     return float(table.loc[table["calibration_mape"].idxmin(), "weight"])
 
@@ -70,6 +82,8 @@ def best_weight(table):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--third", default="chronos2_finetuned", help="the third model to try in a three way blend")
+    parser.add_argument("--search-all", action="store_true",
+                        help="also try every blend of every model with calibration year forecasts, to check nothing beats the three way blend")
     args = parser.parse_args()
     calib, test = load_table("transformer_calibration"), load_table("transformer_forecasts")
     table = weight_table(calib, test)
@@ -102,7 +116,8 @@ if __name__ == "__main__":
         three = three_way_table(calib, test, args.third)
         best = three.loc[three["calibration_mape"].idxmin()]
         alone = three[(three["third_weight"] == 1.0)].iloc[0]
-        print(f"\nthree way blend with {args.third}, weights chosen on the calibration year:")
+        print(f"\nthree way blend with {args.third}, weights chosen on the calibration year "
+              f"(calibration MAPE {best['calibration_mape']:.2f}%):")
         print(f"  {best['lightgbm_weight']:.0%} LightGBM + {best['patchtst_weight']:.0%} PatchTST + {best['third_weight']:.0%} {args.third}")
         print(f"  test MAPE {best['test_mape']:.2f}% (two way blend {ensemble['test_mape']:.2f}%, {args.third} alone "
               f"{alone['test_mape']:.2f}%), in range {best['test_coverage']:.1f}%, width {best['test_width']:.0f} MW")
@@ -117,3 +132,13 @@ if __name__ == "__main__":
         )
     else:
         print(f"\n{args.third} not in the tables yet, run src/chronos2.py for the three way blend")
+
+
+    if args.search_all:
+        models = [m for m in ("lightgbm", "patchtst", "chronos2_finetuned", "chronos2_covariates", "chronos2")
+                  if m in calib and m in test]
+        search = all_blends(calib, test, models)
+        print(f"\nevery blend of {', '.join(models)} in steps of 5% ({len(search):,} blends), best five on the calibration year:")
+        print(search.head(5)[models + ["calibration_mape", "test_mape", "test_coverage"]].round(3).to_string(index=False))
+        save_table(search, "ensemble_search")
+        print("saved ensemble_search")
