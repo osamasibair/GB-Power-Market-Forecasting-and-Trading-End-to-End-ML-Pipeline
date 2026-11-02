@@ -12,9 +12,9 @@ An end-to-end machine learning system that forecasts Great Britain’s electrici
 - **Price: LightGBM model with £21.50/MWh MAE, 15% lower than the best naive baseline, using wind, solar and net demand to forecast cheap and expensive periods.**
 - **Spikes: LightGBM classifier that ranks spike risk 2.5x better than persistence (average precision 0.43 vs 0.17, ROC AUC 0.90).**
 - **Backtest: a simulated 1 MW / 2 MWh battery scheduled from the price forecast earns 77% of the perfect foresight profit, against 52% for a baseline forecast and 74% for a simple average of the last 7 days prices.**
-- **Transformer: a PatchTST transformer implemented and trained in PyTorch (5.61% MAPE) beats Amazon's pretrained Chronos model (7.29%) but not LightGBM (5.08%) on the same days. Blended 25/75 with LightGBM it beats both (4.97%), and attribution shows why the gain is small.**
+- **Deep learning: fine tuned Chronos 2, Amazon's time series foundation model fine tuned on a cloud GPU, is the best single model at 4.49% MAPE against 5.08% for LightGBM. A blend of LightGBM, a PatchTST transformer implemented from scratch in PyTorch, and fine tuned Chronos 2, with every choice made on a validation year, reaches 4.36%, 14% lower error than LightGBM alone.**
 
-**Stack:** Python, pandas, LightGBM, PyTorch, FastAPI, Docker, pytest, SciPy, Ruff, GitHub Actions, PostgreSQL, SQLAlchemy, Docker Compose, MLFlow, Streamlit, Google Cloud (Cloud Run, Artifact Registry, Cloud Storage, Secret Manager, Workload Identity Federation), Neon, Anthropic Claude API.
+**Stack:** Python, pandas, LightGBM, PyTorch, Hugging Face (Chronos 2), Optuna, Google Colab, FastAPI, Docker, pytest, SciPy, Ruff, GitHub Actions, PostgreSQL, SQLAlchemy, Docker Compose, MLFlow, Streamlit, Google Cloud (Cloud Run, Artifact Registry, Cloud Storage, Secret Manager, Workload Identity Federation), Neon, Anthropic Claude API.
 
 ---
 
@@ -46,9 +46,9 @@ Three LightGBM quantile models (q10, q50, q90) give an 80% prediction interval a
 
 The raw quantile models were overconfident, covering only half of actual values. Calibration widened each interval by 758 MW, bringing coverage to the 80% target with misses balanced on both sides. The intervals also adapt to the time of day: they are narrowest overnight (around 3,000 MW) and widest around midday (up to around 6,000 MW).
 
-### Transformer challenger (PatchTST)
+### Gradient boosting vs deep learning
 
-Can deep learning beat gradient boosting here? A PatchTST transformer, implemented from the paper in PyTorch and adapted for day ahead forecasting, was compared with LightGBM and with Chronos-Bolt, Amazon's pretrained time series model, used zero shot.
+Can deep learning beat gradient boosting here? Three kinds of deep learning model were compared with LightGBM on the same days: PatchTST, a transformer implemented from the paper in PyTorch and trained from scratch on this data; Chronos-Bolt and Chronos 2, used zero shot; and Chronos 2 fine tuned on this data. The diagram shows PatchTST.
 
 ```mermaid
 flowchart TD
@@ -70,16 +70,25 @@ Every model sees the same information (demand up to 08:00 the day before, plus t
 | Model | MAE | RMSE | MAPE | 80% interval coverage | Average width |
 |---|---|---|---|---|---|
 | Naive baseline (same time last week) | 2,130 MW | 2,875 MW | 8.39% | — | — |
-| Chronos-Bolt small (pretrained, zero shot) | 1,839 MW | 2,437 MW | 7.29% | 78.6% | 5,614 MW |
-| PatchTST (trained here) | 1,368 MW | 1,793 MW | 5.61% | 77.7% | 4,135 MW |
-| **LightGBM** | **1,246 MW** | **1,647 MW** | **5.08%** | **80.2%** | **4,035 MW** |
+| Chronos-Bolt small (zero shot, demand only) | 1,839 MW | 2,437 MW | 7.29% | 78.6% | 5,614 MW |
+| Chronos 2 (zero shot, demand only) | 1,673 MW | 2,266 MW | 6.72% | 79.9% | 5,242 MW |
+| PatchTST (trained from scratch) | 1,368 MW | 1,793 MW | 5.61% | 77.7% | 4,135 MW |
+| Chronos-2 (zero shot, with weather and calendar) | 1,383 MW | 1,861 MW | 5.53% | 81.4% | 4,757 MW |
+| LightGBM (in production) | 1,246 MW | 1,647 MW | 5.08% | 80.2% | 4,035 MW |
 | Blend: 75% LightGBM + 25% PatchTST | — | — | 4.97% | 79.2% | 3,796 MW |
+| Blend: 50% LightGBM + 15% PatchTST + 35% zero shot Chronos 2 | — | — | 4.71% | 80.1% | 3,768 MW |
+| Chronos 2 (fine-tuned, with weather and calendar) | 1,125 MW | 1,475 MW | 4.49% | 81.3% | 3,701 MW |
+| **Blend: 35% LightGBM + 5% PatchTST + 60% fine-tuned Chronos-2** | — | — | **4.36%** | **80.4%** | **3,483 MW** |
 
 ![PatchTST and LightGBM forecasts for the week of 5 January 2026](docs/patchtst_forecast_week.png)
 
 ![Which past half hours each of tomorrow's forecasts depends on](docs/patchtst_influence.png)
 
-- **The transformer beats the pretrained model by 23% but not LightGBM.** LightGBM stays in production. This matches what forecasting competitions such as M5 found: gradient boosting with good features is hard to beat on a few years of data.
+- **Fine tuning a pretrained foundation model beat everything else.** Zero shot, with tomorrow's weather and calendar as known future inputs, Chronos 2 already matches PatchTST trained from scratch (5.53% vs 5.61%) without being trained on this data. Fine-tuning it for 500 steps on a free Colab GPU (`notebooks/chronos2_finetune_colab.ipynb`) cut its error by a further 19%, to 4.49%: 12% better than LightGBM, with narrower intervals that stay calibrated (81.3%). Pretraining on a large and varied set of time series gives it knowledge that three years of GB demand alone can't, and fine-tuning adapts that to this data. Fine-tuning only used data up to each forecast's 08:00 cutoff, Chronos-2 was released in October 2025 so most of the test year comes after it, and zero shot it doesn't beat LightGBM, so it isn't simply recognising this data. This is one fine-tuning run; runs with other random seeds are planned.
+- **Weather matters to the pretrained model too.** On demand alone Chronos 2 scores 6.72%, 8% better than the older Chronos-Bolt; given the weather and calendar, 5.53%, a further 18% better.
+- **The best forecast blends gradient boosting with deep learning.** 35% LightGBM, 5% PatchTST and 60% fine-tuned Chronos 2 scores 4.36%, 14% lower error than LightGBM alone, with 80.4% coverage and intervals 14% narrower. Every choice was made on the calibration year: the fine tuned Chronos 2 over the zero shot one (4.01% vs 4.30% calibration MAPE for their best blends), and the weights. Weights chosen with hindsight on the test year would only reach 4.34%, so the choice transferred well. LightGBM keeps a third of the weight because its mistakes differ from the deep models'. PatchTST's share falls to 5% because fine tuned Chronos 2 covers most of what it added: without it the blend scores 4.02% on the calibration year and the same 4.36% on the test year.
+- **No other blend does meaningfully better.** Every blend of the five models with validation year forecasts (LightGBM, PatchTST and the three Chronos 2 versions), in steps of 5% (10,626 blends, `python src/ensemble.py --search-all`), was scored on the validation year. The best scored 4.007% there, against 4.01% for the three-way blend: a difference far below the variation between random seeds. The top blends form a flat plateau (all within 0.003 points), share the same shape (about 30 to 35% LightGBM, 55 to 60% fine tuned Chronos 2 and 5 to 10% PatchTST) and score 4.35 to 4.37% on the test year. The two zero-shot Chronos 2 versions get at most 10% between them, because their mistakes largely repeat the fine tuned version's. So the three-way blend is kept as the final model: no larger blend is meaningfully better, and every extra weight chosen on the same year adds risk of overfitting it.
+- **PatchTST beats the pretrained Chronos-Bolt by 23% but not LightGBM alone.** This matches what forecasting competitions such as M5 found: gradient boosting with good features is hard to beat on a few years of data, for a model trained from scratch.
 - **Letting each forecast half-hour choose what to look at helped most.** The papers head flattens the 27 patch summaries into one long vector, through a single layer holding 221,312 of the model's 347,525 parameters. Three heads were compared on the same days with `src/ablation.py`:
 
   | Head | Parameters | MAPE | 80% interval coverage | Average width |
@@ -227,6 +236,11 @@ python src/plot_patchtst.py    # draw the figures in docs/
 python src/ensemble.py         # blend LightGBM and PatchTST, choosing the weight on the calibration year
 python src/ablation.py pooling flatten mean attention   # compare settings, here the three heads
 python src/ablation.py weather 1 0 --seeds 42 1 2   # e.g. retrain with and without weather, three seeds each
+python src/tune_patchtst.py --trials 40   # tune PatchTST with Optuna on the calibration year only
+python src/chronos2.py --skip-finetune    # Chronos 2 zero shot, with and without weather (run after train_patchtst.py)
+python src/chronos2.py --export data/chronos2_input.csv.gz    # inputs for fine tuning on a GPU, see notebooks/chronos2_finetune_colab.ipynb
+python src/chronos2.py --import data/chronos2_finetuned.csv.gz   # add the fine-tuned forecasts made on the GPU
+python src/ensemble.py --search-all       # two and three way blends, plus every blend of every model
 ```
 
 Each training script logs its settings, results and model to MLflow. Open `http://localhost:5001` to browse and compare runs, and to see model versions.
@@ -326,7 +340,9 @@ flowchart LR
 | PatchTST | `src/patchtst.py`, `src/forecast_windows.py` | The transformer (RevIN, patching, encoder, quantile head) and its training loop, and the forecast windows every model is scored on |
 | Transformer comparison | `src/train_patchtst.py` | Trains PatchTST with early stopping, calibrates it, and compares it with LightGBM and Chronos on the same test days |
 | Transformer figures | `src/plot_patchtst.py` | Draws a forecast week, the learning curve and the attribution heatmap into `docs/` |
-| Ensemble and ablations | `src/ensemble.py`, `src/ablation.py` | Blends LightGBM and PatchTST with the weight chosen on the calibration year, and retrains PatchTST once per value of a setting to compare them |
+| Ensemble and ablations | `src/ensemble.py`, `src/ablation.py` | Blends LightGBM, PatchTST and Chronos 2 with weights chosen on the calibration year, searches every blend of the models, and retrains PatchTST once per value of a setting over several seeds |
+| Tuning | `src/tune_patchtst.py` | Tunes PatchTSTs settings with Optuna, scored on the calibration year only |
+| Chronos-2 | `src/chronos2.py`, `notebooks/chronos2_finetune_colab.ipynb` | Forecasts with Chronos 2 zero shot (with and without weather and calendar) and fine tuned, with export and import for fine tuning on a cloud GPU |
 | Retrain | `src/retrain.py` | Checks a newly trained model against the baseline on the latest 8 weeks, then retrains the demand and interval models on all data and recalibrates the intervals |
 | Price features | `src/price_features.py` | Adds wind, solar, net demand and price lag features |
 | Price model | `src/train_price.py` | Selects features on a validation year, trains LightGBM and compares it with two baselines |
@@ -335,12 +351,12 @@ flowchart LR
 | Monitor | `src/monitor.py` | Replays the test year day by day: daily error against the baseline, interval coverage and monthly input drift, saved to PostgreSQL |
 | Live | `src/live.py` | Fetches the last 21 days of demand and a weather forecast, forecasts tomorrow, and scores earlier live forecasts once their actual demand is known |
 | Briefing | `src/briefing.py` | Sends the day's figures to Claude for a short english briefing, and rejects it if it contains any number not in those figures |
-| Dashboard | `dashboard/app.py` | Streamlit dashboard with live demand monitoring page (forecasts, accuracy, coverage, drift and freshness, with alerts) and research pages for the price forecast, the spike classifier, the battery backtest and the transformer comparison |
+| Dashboard | `dashboard/app.py` | Streamlit dashboard with live demand monitoring page (forecasts, accuracy, coverage, drift and freshness, with alerts) and research pages for the price forecast, the spike classifier, the battery backtest and the gradient boosting vs deep learning comparison |
 | Evaluate | `src/evaluate.py` | MAE, RMSE, MAPE and quantile loss |
 | Tracking | `src/tracking.py` | Logs each training runs settings, metrics and model files to MLflow, and registers the demand, price and spike models |
 | Predict | `src/predict.py` | Loads the saved models and forecasts a chosen day with interval |
 | Serve | `api/main.py` | FastAPI service, packaged with the `Dockerfile` and run alongside PostgreSQL with `docker-compose.yml` |
-| Test | `tests/` | Unit tests for metrics, features, the spike definition, the battery, the monitoring, the database, the briefing (using a mocked Claude client), and the transformer (no look ahead in its windows, non crossing quantiles, reproducibility, saving and loading), plus API tests |
+| Test | `tests/` | Unit tests for metrics, features, the spike definition, the battery, the monitoring, the database, the briefing (using a mocked Claude client), the transformer (no look ahead in its windows, non crossing quantiles, reproducibility, saving and loading), Chronos 2 (inputs stop at the 08:00 cutoff, forecasts made on another machine are matched to the right days) and the blends, plus API tests |
 | CI | `.github/workflows/tests.yml` | Lints, starts PostgreSQL, runs the tests with coverage, and starts the API and dashboard with Docker Compose on every push |
 | Scheduled retraining | `.github/workflows/retrain.yml` | Every Monday, downloads the latest data, rebuilds the features and runs the retraining, publishing if the quality gate is passed |
 | Deploy | `.github/workflows/deploy.yml` | After CI passes on `main`, or after a retrain, builds and pushes the image and deploys the API and dashboard to cloud run |
@@ -352,7 +368,7 @@ flowchart LR
 - **Weather:** Hourly temperature, wind speed and shortwave radiation for London from the Open Meteo historical forecast API, interpolated to half hourly. These are archived weather forecasts rather than measured weather, so the model trains on the same kind of input it gets live, where the daily job uses the Open Meteo forecast API. Training on measured weather and serving on forecasts would make the model rely on weather inputs more than live forecasts can support.
 - **Prices:** Market Index Price (APX/EPEX) from the Elexon BMRS API. Six missing half hours and 34 half hours with zero traded volume were filled by interpolation.
 - **Wind and solar generation:** Actual onshore wind, offshore wind and solar generation from the Elexon BMRS API. 4,383 republished duplicate rows were removed (keeping the latest version), 863 missing half-hours (longest gap 7 hours) were filled by interpolation, and 15 small negative values were set to zero.
-- **Storage:** Raw downloads are kept as CSV files, untouched. Everything from cleaning onwards is stored in PostgreSQL tables: `dataset`, `market`, `features` and `price_features`, plus `monitoring_daily` and `monitoring_drift` for the replay, `live_forecasts`, `live_briefing` and `monitoring_live` for live forecasts, `backtest_daily`, `price_forecasts`, `transformer_forecasts`, `transformer_training`, `transformer_influence`, `ensemble_weights` and `transformer_ablation` for the research pages.
+- **Storage:** Raw downloads are kept as CSV files, untouched. Everything from cleaning onwards is stored in PostgreSQL tables: `dataset`, `market`, `features` and `price_features`, plus `monitoring_daily` and `monitoring_drift` for the replay, `live_forecasts`, `live_briefing` and `monitoring_live` for live forecasts, `backtest_daily`, `price_forecasts`, `transformer_forecasts`, `transformer_calibration`, `transformer_training`, `transformer_influence`, `ensemble_weights`, `ensemble_search` and `transformer_ablation` for the research pages.
 
 Validation found two days each missing one settlement period (2023-07-17 period 45 and 2023-12-29 period 8), which were filled by time interpolation.
 
@@ -418,6 +434,8 @@ The price model uses the demand, weather and calendar features (without `dayofye
 
 **Transformer comparison.** PatchTST sees exactly what the live job has at 08:00 the day before: the previous 7 days of demand, then a 16 hour gap, then tomorrow's weather and calendar. RevIN (reversible instance normalisation) scales each week to mean 0 and spread 1 and undoes it on the output, so the model learns the shape of demand and copes as the overall level drifts between seasons and years. The quantile head predicts the median plus two positive gaps, so its 10%, 50% and 90% forecasts can never cross. It's trained with AdamW, a warmup then cosine learning rate schedule, gradient clipping and early stopping on the calibration year, then refitted on the full training period for the best number of epochs, mirroring how the LightGBM intervals are built. On macOS, LightGBM and PyTorch each load their own OpenMP threading library and freeze or crash when both run in one process, so the comparison scores LightGBM in a separate process.
 
+**Chronos 2.** Unlike Chronos-Bolt, Chronos 2 reads covariates, so it gets the same inputs as the other models: demand up to 08:00 the day before (about three weeks of it), and the weather and calendar for the 16 hour gap and tomorrow as known future values. It forecasts the 80 half hours from 08:00 and keeps the last 48. Fine tuning mirrors PatchTST: once on data before the calibration year, whose forecasts set the conformal adjustment and the blend weights, then again on everything before the test year for the test forecasts, each stopping at its first forecast's 08:00 cutoff. A 120M parameter model needs a GPU (on a MacBook Air one step took over four minutes), so fine-tuning runs on Google Colab's free T4 GPU from an exported file, using gradient accumulation to fit in memory, and the forecasts are imported back for calibration and scoring.
+
 ---
 
 ## Limitations
@@ -432,7 +450,7 @@ The price model uses the demand, weather and calendar features (without `dayofye
 - Half hourly prices are noisy, and extreme spikes and negative prices remain hard to predict.
 - A spike probability cut off chosen on one year transfers imperfectly to a more volatile year, in practice it would need recalibrating regularly.
 - The briefing check verifies that every number came from the source figures, but not that it's attached to the right label (a real MAPE figure described as coverage would pass), and it can't check numbers written as words.
-- PatchTST is untuned, as it uses one set of reasonable settings, not a hyperparameter search. Chronos-Bolt is asked for 80 steps ahead (the 16 hour gap plus tomorrow), beyond the 64 it was trained for, which may understate it.
+- The fine tuned Chronos 2 result comes from one fine tuning run; more runs with other random seeds would show its spread. Fine tuning needs a GPU, so unlike LightGBM it isn't retrained automatically yet, and the blend isn't served live: LightGBM still makes the live forecasts. PatchTST uses its default settings, because tuning with Optuna didn't carry over to the test year. Chronos-Bolt is asked for 80 steps ahead (the 16 hour gap plus tomorrow), beyond the 64 it was trained for, which may understate it.
 
 ---
 

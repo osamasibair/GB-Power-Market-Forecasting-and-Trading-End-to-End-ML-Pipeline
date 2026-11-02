@@ -1,5 +1,6 @@
-"""Transformer page, the PatchTST transformer against LightGBM and a pretrained Chronos model over the test year."""
+"""Gradient boosting vs deep learning page: LightGBM against PatchTST, Chronos Bolt and Chronos 2, and their blends, over the test year."""
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -14,8 +15,11 @@ names = {
     "chronos2_finetuned": "Chronos-2 (fine tuned, with weather)",
     "patchtst": "PatchTST (trained from scratch)",
     "lightgbm": "LightGBM",
+    "blend": "Best blend (35% LightGBM, 5% PatchTST, 60% fine tuned Chronos-2)",
 }
-colours = {"Actual": "#888780", "LightGBM": "#eb6834", "PatchTST": "#2a78d6", "Chronos": "#1baf7a", "Ensemble": "#e87ba4"}
+colours = {"Actual": "#888780", "LightGBM": "#eb6834", "PatchTST": "#2a78d6", "Chronos": "#1baf7a",
+           "Chronos-2 fine tuned": "#7f56d9", "Best blend": "#0b0b0b", "Ensemble": "#e87ba4"}
+best_blend = {"lightgbm": 0.35, "patchtst": 0.05, "chronos2_finetuned": 0.60}
 
 
 def load_optional(name):
@@ -42,6 +46,16 @@ def scores(forecasts):
     table = pd.DataFrame(rows).set_index("Model").sort_values("MAPE (%)", ascending=False)
     return table.round({"MAE (MW)": 0, "RMSE (MW)": 0, "MAPE (%)": 2, "In 80% range (%)": 1, "Average width (MW)": 0})
 
+def add_best_blend(forecasts, calibration):
+    """Add the final blend to the test year forecasts, with its 80% range recalibrated on the calibration year like the other models, so it matches src/ensemble.py."""
+    if calibration is None or any(m not in forecasts or m not in calibration for m in best_blend):
+        return forecasts
+    def mix(frame, part):
+        return sum(weight * frame[f"{model}{part}"] for model, weight in best_blend.items())
+    low, high = mix(calibration, "_low"), mix(calibration, "_high")
+    adjustment = float(np.quantile(np.maximum(low - calibration["actual"], calibration["actual"] - high), 0.8))
+    return forecasts.assign(blend=mix(forecasts, ""), blend_low=mix(forecasts, "_low") - adjustment,
+                            blend_high=mix(forecasts, "_high") + adjustment)
 
 def week_chart(week, chosen):
     data = week.rename_axis("time").reset_index()
@@ -49,7 +63,8 @@ def week_chart(week, chosen):
         x=alt.X("time:T", title=None, axis=alt.Axis(format="%a %d %b", tickCount="day")),
         y=alt.Y("patchtst_low:Q", title="Demand (MW)", scale=alt.Scale(zero=False)), y2="patchtst_high:Q")
     columns = {key: name for key, name in {"actual": "Actual", "lightgbm": "LightGBM", "patchtst": "PatchTST",
-               "chronos": "Chronos", "ensemble": "Ensemble"}.items() if key in data and (name == "Actual" or name in chosen)}
+               "chronos": "Chronos", "chronos2_finetuned": "Chronos-2 fine tuned", "blend": "Best blend",
+               "ensemble": "Ensemble"}.items() if key in data and (name == "Actual" or name in chosen)}
     lines = data.melt("time", list(columns), var_name="model", value_name="demand")
     lines["model"] = lines["model"].map(columns)
     shown = [name for name in colours if name in set(lines["model"])]
@@ -96,9 +111,21 @@ forecasts = load_optional("transformer_forecasts")
 if forecasts is None:
     st.info("No transformer results yet. Run src/train_patchtst.py to create them.")
     st.stop()
+forecasts = add_best_blend(forecasts, load_optional("transformer_calibration"))
 forecasts = forecasts.set_axis(forecasts.index.tz_localize("UTC").tz_convert("Europe/London").tz_localize(None))
 
 st.dataframe(scores(forecasts))
+if "blend" in forecasts:
+    actual = forecasts["actual"]
+    def mape(key):
+        return ((forecasts[key] - actual).abs() / actual).mean() * 100
+    def width(key):
+        return (forecasts[f"{key}_high"] - forecasts[f"{key}_low"]).mean()
+    covered = ((actual >= forecasts["blend_low"]) & (actual <= forecasts["blend_high"])).mean() * 100
+    left, middle, right = st.columns(3)
+    left.metric("Best blend: test MAPE", f"{mape('blend'):.2f}%", f"{mape('blend') - mape('lightgbm'):+.2f} vs LightGBM", delta_color="inverse")
+    middle.metric("In 80% range", f"{covered:.1f}%", "target 80%", delta_color="off")
+    right.metric("Average range width", f"{width('blend'):,.0f} MW", f"{width('blend') - width('lightgbm'):+,.0f} MW vs LightGBM", delta_color="inverse")
 st.caption("Lower error is better, and a well calibrated 80% range contains about 80% of actual values. Fine tuned Chronos-2 is the only single model that beats LightGBM, and a blend of LightGBM, PatchTST and fine tuned Chronos-2 does better still (4.36% MAPE). LightGBM stays in production until the blend passes a live shadow test.")
 
 ensemble = load_optional("ensemble_weights")
@@ -121,10 +148,11 @@ first, last = forecasts.index.min().date(), forecasts.index.max().date()
 default = min(max(pd.Timestamp("2026-01-05").date(), first), last)
 start = st.date_input("Week starting", value=default, min_value=first, max_value=last)
 week = forecasts.loc[pd.Timestamp(start):pd.Timestamp(start) + pd.Timedelta(days=7) - pd.Timedelta(minutes=30)]
-available = [name for key, name in [("lightgbm", "LightGBM"), ("patchtst", "PatchTST"), ("chronos", "Chronos"), ("ensemble", "Ensemble")] if key in forecasts]
-chosen = st.multiselect("Models to show", available, default=[name for name in ("LightGBM", "PatchTST") if name in available])
+available = [name for key, name in [("blend", "Best blend"), ("chronos2_finetuned", "Chronos-2 fine tuned"), ("lightgbm", "LightGBM"),
+             ("patchtst", "PatchTST"), ("chronos", "Chronos"), ("ensemble", "Ensemble")] if key in forecasts]
+chosen = st.multiselect("Models to show", available, default=[name for name in ("Best blend", "LightGBM") if name in available])
 st.altair_chart(week_chart(week, chosen), width="stretch")
-st.caption("Forecasts against actual demand, with the PatchTST 80% range shaded. Pick any week in the test year: the models often make different mistakes, which is why blending them beats both.")
+st.caption("Forecasts against actual demand (the PatchTST 80% range is shaded when PatchTST is shown). Pick any week in the test year: the models often make different mistakes, which is why blending them beats each of them alone. Ensemble is the LightGBM and PatchTST blend from the slider above.")
 
 influence = load_optional("transformer_influence")
 if influence is not None:
