@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 raw = Path("data/raw")
 elexon = "https://data.elexon.co.uk/bmrs/api/v1/demand/outturn"
@@ -13,6 +15,9 @@ weather = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 weather_forecast = "https://api.open-meteo.com/v1/forecast"
 market_index = "https://data.elexon.co.uk/bmrs/api/v1/balancing/pricing/market-index"
 wind_solar = "https://data.elexon.co.uk/bmrs/api/v1/generation/actual/per-type/wind-and-solar"
+retry = Retry(total=5, backoff_factor=10, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET"], raise_on_status=False)
+session = requests.Session()
+session.mount("https://", HTTPAdapter(max_retries=retry))
 
 def fetch_demand(start, end):
     frames = []
@@ -22,7 +27,7 @@ def fetch_demand(start, end):
             "settlementDateFrom": period_start.strftime("%Y-%m-%d"),
             "settlementDateTo": period_end.strftime("%Y-%m-%d"),
                 }
-        response = requests.get(elexon, params=dates, timeout=30)
+        response = session.get(elexon, params=dates, timeout=30)
         response.raise_for_status()
         frames.append(pd.DataFrame(response.json()["data"]))
         print(f"demand: {period_start:%Y-%m-%d} to {period_end:%Y-%m-%d}")
@@ -38,7 +43,7 @@ def fetch_weather(start, end, lat=51.5072, lon=-0.1276):
         "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation",
         "timezone": "UTC",
     }
-    response = requests.get(weather, params=query, timeout=60)
+    response = session.get(weather, params=query, timeout=60)
     response.raise_for_status()
     return pd.DataFrame(response.json()["hourly"])
 
@@ -51,7 +56,7 @@ def fetch_weather_forecast(past_days, forecast_days, lat=51.5072, lon=-0.1276):
         "past_days": past_days,
         "forecast_days": forecast_days,
     }
-    response = requests.get(weather_forecast, params=query, timeout=60)
+    response = session.get(weather_forecast, params=query, timeout=60)
     response.raise_for_status()
     return pd.DataFrame(response.json()["hourly"])
 
@@ -65,7 +70,7 @@ def fetch_weekly(url, start, end, label, extra_params=None):
         }
         if extra_params:
             query.update(extra_params)
-        response = requests.get(url, params=query, timeout=30)
+        response = session.get(url, params=query, timeout=30)
         response.raise_for_status()
         frames.append(pd.DataFrame(response.json()["data"]))
         print(f"{label}: {period_start:%Y-%m-%d} to {period_end:%Y-%m-%d}")
