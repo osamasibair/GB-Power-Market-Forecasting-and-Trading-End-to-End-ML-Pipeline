@@ -6,7 +6,7 @@
 
 An end-to-end machine learning system that forecasts Great Britain’s electricity demand, prices and backtests battery trading, taken to production, then used as a testbed to compare gradient boosting with deep learning.
 
-**Live:** [API docs](https://electricity-api-xqiuvbbyca-nw.a.run.app/docs) · [Latest forecast](https://electricity-api-xqiuvbbyca-nw.a.run.app/forecast/latest) · [Dashboard](https://electricity-dashboard-xqiuvbbyca-nw.a.run.app) (live monitoring, plus price, spike, backtest and model comparison results)
+**Live:** [API docs](https://electricity-api-xqiuvbbyca-nw.a.run.app/docs) · [Latest forecast](https://electricity-api-xqiuvbbyca-nw.a.run.app/forecast/latest) · [Dashboard](https://electricity-dashboard-xqiuvbbyca-nw.a.run.app) (demand forecasting, live and on the test year, plus price, spike and battery results on the test year)
 
 - **Demand: LightGBM day ahead model: 5.08% MAPE, about 39% lower error than a same-time-last-week baseline (8.39%), with 80% prediction intervals achieving 80.2% coverage.**
 - **Price: LightGBM model with £21.50/MWh MAE, 15% lower than the best naive baseline, using wind, solar and net demand to forecast cheap and expensive periods.**
@@ -351,7 +351,7 @@ flowchart LR
 | Monitor | `src/monitor.py` | Replays the test year day by day: daily error against the baseline, interval coverage and monthly input drift, saved to PostgreSQL |
 | Live | `src/live.py` | Fetches the last 21 days of demand and a weather forecast, forecasts tomorrow, and scores earlier live forecasts once their actual demand is known |
 | Briefing | `src/briefing.py` | Sends the day's figures to Claude for a short english briefing, and rejects it if it contains any number not in those figures |
-| Dashboard | `dashboard/app.py` | Streamlit dashboard with live demand monitoring page (forecasts, accuracy, coverage, drift and freshness, with alerts) and research pages for the price forecast, the spike classifier, the battery backtest and the gradient boosting vs deep learning comparison (sliders to try any blend of LightGBM, PatchTST and fine tuned Chronos 2, and each model's error by month) |
+| Dashboard | `dashboard/app.py` | Streamlit dashboard in two sections. Demand forecasting: a live page using LightGBM (forecasts, accuracy, coverage, drift and freshness, with alerts) and a test year page comparing gradient boosting with deep learning (sliders to try any blend of LightGBM, PatchTST and fine tuned Chronos 2, and each model's error by month). Prices and trading, using LightGBM: the price forecast, spike classifier and battery backtest on the test year |
 | Evaluate | `src/evaluate.py` | MAE, RMSE, MAPE and quantile loss |
 | Tracking | `src/tracking.py` | Logs each training runs settings, metrics and model files to MLflow, and registers the demand, price and spike models |
 | Predict | `src/predict.py` | Loads the saved models and forecasts a chosen day with interval |
@@ -444,7 +444,7 @@ The price model uses the demand, weather and calendar features (without `dayofye
 - Weather comes from London only, while national demand depends on weather across Great Britain, especially for solar.
 - Holidays follow the England and Wales calendar; Scotland and Northern Ireland differ.
 - MLflow runs locally only, so the weekly retraining on githubs machines isn't tracked there. Retrained models are versioned by their report in cloud storage and kept as 30 day workflow artifacts instead.
-- The price and spike models arent served live, because live price forecasts would need wind and solar generation forecasts.
+- The price, spike and battery models are evaluated on the test year only, not run live. The price model uses actual wind, solar and demand, so running it live would mean retraining it on day ahead forecasts of those inputs; the spike model and a daily paper traded battery could then run on top of it.
 - Interval coverage holds over the test year as a whole, not on every day, so easy days are covered more often and unusual days (such as Christmas) less often. The choice to apply the calibration to retrained models was checked once against the test set.
 - The price model has no gas price input, although gas usually sets GB power prices. The 7-day average price captures its effect only indirectly.
 - Half hourly prices are noisy, and extreme spikes and negative prices remain hard to predict.
