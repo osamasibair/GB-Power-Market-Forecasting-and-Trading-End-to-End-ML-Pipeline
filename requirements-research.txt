@@ -1,4 +1,4 @@
-torch==2.14.1
+torch==2.15.0
 chronos-forecasting==2.3.2
 torchinfo==1.8.0
 optuna==5.0.0
