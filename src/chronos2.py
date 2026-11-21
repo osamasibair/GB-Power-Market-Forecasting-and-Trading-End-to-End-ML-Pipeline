@@ -19,7 +19,11 @@ Fine-tuning a 120M parameter model needs a real GPU, so it can also run on anoth
 that has no access to the database. Export the inputs, fine-tune there, and import the forecasts:
     python src/chronos2.py --export chronos2_input.csv.gz                                   # here
     python src/chronos2.py --from-file chronos2_input.csv.gz --to-file chronos2_finetuned.csv.gz   # on the GPU
-    python src/chronos2.py --import chronos2_finetuned.csv.gz                               # here again"""
+    python src/chronos2.py --import chronos2_finetuned.csv.gz                               # here again
+To measure how much fine tuning varies between runs, repeat it with other random seeds and import each run under its own
+name, which adds it as extra columns without replacing the main one:
+    python src/chronos2.py --from-file chronos2_input.csv.gz --to-file chronos2_finetuned_seed1.csv.gz --seed 1
+    python src/chronos2.py --import chronos2_finetuned_seed1.csv.gz --name chronos2_finetuned_seed1"""""
 import argparse
 import multiprocessing
 import time
@@ -86,16 +90,17 @@ def training_series(demand, cov, end):
     return [{"target": demand[:end], "past_covariates": {name: cov[:end, i] for i, name in enumerate(names)}}]
 
 
-def fine_tune(pipeline, demand, cov, end, context, steps, learning_rate, batch_size, accumulate, output_dir):
+def fine_tune(pipeline, demand, cov, end, context, steps, learning_rate, batch_size, accumulate, seed, output_dir):
     """A fine tuned copy of `pipeline`, trained only on data before position `end`. Every covariate is marked as known
     in advance, as weather forecasts and the calendar are. Gradients from `accumulate` batches are added up before each
-    update, which trains like a batch that many times bigger without needing the memory for it."""
+    update, which trains like a batch that many times bigger without needing the memory for it. `seed` sets which
+    training windows are sampled and the dropout, so runs with different seeds show how much fine tuning varies."""
     from chronos.chronos2.preprocess import from_list_of_dicts
 
     inputs = from_list_of_dicts(training_series(demand, cov, end), prediction_length=steps_ahead, known_covariates_names=names)
     return pipeline.fit(inputs, prediction_length=steps_ahead, context_length=context, num_steps=steps,
                         learning_rate=learning_rate, batch_size=batch_size, output_dir=str(output_dir),
-                        gradient_accumulation_steps=accumulate)
+                        gradient_accumulation_steps=accumulate, seed=seed)
 
 
 def load_pipeline(device):
@@ -109,8 +114,8 @@ def load_pipeline(device):
 def fine_tuned_forecasts(pretrained, demand, cov, calib_positions, test_positions, args):
     """Fine tune twice, then forecast the calibration days with the model trained before them and the test days with the
     model trained on everything before the test year. Each model only sees data up to its first forecast's 08:00 cutoff."""
-    settings = (args.context, args.steps, args.learning_rate, args.batch_size, args.accumulate)
-    print(f"fine-tuning for {args.steps} steps on data before the calibration year")
+    settings = (args.context, args.steps, args.learning_rate, args.batch_size, args.accumulate, args.seed)
+    print(f"fine-tuning for {args.steps} steps with seed {args.seed} on data before the calibration year")
     early = fine_tune(pretrained, demand, cov, calib_positions[0] - gap_steps, *settings, Path("models") / "chronos2-early")
     print("fine-tuning again on all data before the test year")
     final = fine_tune(pretrained, demand, cov, test_positions[0] - gap_steps, *settings, Path("models") / "chronos2-final")
@@ -186,12 +191,16 @@ if __name__ == "__main__":
                         help="fine-tuning batch size, counting each covariate as a series, so 32 is about 3 windows (default 32)")
     parser.add_argument("--accumulate", type=int, default=4,
                         help="batches whose gradients are added up before each update, so 32 x 4 trains like 128 (default 4)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="random seed for fine-tuning (default 42, the Hugging Face default the first run used)")
     parser.add_argument("--device", default=None, help="cpu, mps (Apple GPU) or cuda (default: cuda or mps if there is one, otherwise cpu)")
     parser.add_argument("--skip-finetune", action="store_true", help="only run the two zero shot versions")
     parser.add_argument("--export", metavar="FILE", help="save the inputs for fine-tuning on another machine, then stop")
     parser.add_argument("--from-file", metavar="FILE", help="on the GPU machine: fine-tune from an exported file, no database needed")
     parser.add_argument("--to-file", metavar="FILE", default="chronos2_finetuned.csv.gz", help="where --from-file saves the forecasts")
     parser.add_argument("--import", dest="import_file", metavar="FILE", help="add fine-tuned forecasts made on another machine")
+    parser.add_argument("--name", default="chronos2_finetuned",
+                        help="column name for --import, such as chronos2_finetuned_seed1 for a run with another seed (default chronos2_finetuned)")
     args = parser.parse_args()
 
     if args.from_file:
@@ -226,7 +235,7 @@ if __name__ == "__main__":
 
     raw = {}
     if args.import_file:
-        raw["chronos2_finetuned"] = read_forecasts(args.import_file, df.index[rows(calib_days)], df.index[rows(test_days)])
+        raw[args.name] = read_forecasts(args.import_file, df.index[rows(calib_days)], df.index[rows(test_days)])
         device = "imported"
     else:
         import torch
@@ -259,7 +268,8 @@ if __name__ == "__main__":
     save_table(calibration_table, "transformer_calibration")
     print(f"added {', '.join(raw)} to transformer_forecasts and transformer_calibration")
 
-    everything = scored(forecasts_table, ["baseline", "chronos", *versions, "patchtst", "lightgbm"])
+    seeds = sorted(c for c in forecasts_table if c.startswith("chronos2_finetuned_seed") and not c.endswith(("_low", "_high")))
+    everything = scored(forecasts_table, ["baseline", "chronos", *versions, *seeds, "patchtst", "lightgbm"])
     print(f"\n{'model':22} {'MAE':>7} {'RMSE':>7} {'MAPE':>7} {'in range':>9} {'width':>8}")
     for name, m in everything.items():
         interval = f"{m['coverage']:8.1f}% {m['width']:6.0f} MW" if "coverage" in m else f"{'-':>9} {'-':>8}"
@@ -269,3 +279,8 @@ if __name__ == "__main__":
             params={"model": model_name, "context": args.context, "steps": args.steps, "learning_rate": args.learning_rate,
                     "batch_size": args.batch_size, "accumulate": args.accumulate, "device": device},
             metrics={f"{name}_{k}": v for name, m in results.items() for k, v in m.items()}, files=[])
+
+    runs = [everything[k]["mape"] for k in ["chronos2_finetuned", *seeds] if k in everything]
+    if len(runs) > 1:
+        print(f"\nfine-tuned Chronos-2 over {len(runs)} seeds: test MAPE {np.mean(runs):.2f}% ± {np.std(runs, ddof=1):.2f}"
+              f" (runs: {', '.join(f'{m:.2f}%' for m in runs)})")

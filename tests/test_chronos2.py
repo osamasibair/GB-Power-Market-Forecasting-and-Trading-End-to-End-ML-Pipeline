@@ -121,6 +121,24 @@ def test_fine_tuning_runs_and_gives_calibration_and_test_forecasts(tmp_path, mon
     df = make_features(days=60)
     demand, cov, grid = regular_grid(df)
     days = grid.get_indexer(df.index[day_windows(df.index)])
-    settings = Namespace(context=512, steps=2, learning_rate=1e-5, batch_size=8, accumulate=2)
+    settings = Namespace(context=512, steps=2, learning_rate=1e-5, batch_size=8, accumulate=2, seed=42)
     calib, test = fine_tuned_forecasts(pipeline, demand, cov, days[-6:-3], days[-3:], settings)
     assert calib.shape == test.shape == (3, horizon, 3)
+
+
+def test_fine_tuning_with_the_same_seed_repeats_and_another_seed_differs(tmp_path, monkeypatch):
+    from chronos2 import fine_tune, forecast
+
+    monkeypatch.chdir(tmp_path)
+    df = make_features(days=60)
+    demand, cov, grid = regular_grid(df)
+    days = grid.get_indexer(df.index[day_windows(df.index)])
+
+    def run(seed):
+        torch.manual_seed(0)  # the same starting model every time, so only the fine tuning seed differs
+        tuned = fine_tune(tiny_pipeline(), demand, cov, days[-3] - gap_steps, 512, 3, 1e-3, 8, 1, seed, tmp_path / str(seed))
+        return forecast(tuned, demand, cov, days[-3:], 512, True)
+
+    first = run(1)
+    assert np.allclose(first, run(1))
+    assert not np.allclose(first, run(2))
