@@ -60,24 +60,25 @@ def week_chart(week, field, title, cutoff=None, day=None, domain=None):
     layers = [line]
     if day is not None:
         shade = pd.DataFrame({"start": [day], "end": [day + pd.Timedelta(days=1)]})
-        layers.insert(0, alt.Chart(shade).mark_rect(color=colours["forecast"], opacity=0.12).encode(x="start:T", x2="end:T"))
+        layers.insert(0, alt.Chart(shade).mark_rect(color=colours["forecast"], opacity=0.20).encode(x="start:T", x2="end:T"))
     if cutoff is not None:
         rule = pd.DataFrame({"time": [cutoff], "label": ["08:00 cutoff"]})
         layers.append(alt.Chart(rule).mark_rule(strokeDash=[4, 3], color=colours["actual"]).encode(x="time:T"))
-        layers.append(alt.Chart(rule).mark_text(align="left", dx=4, dy=-120, color=colours["actual"]).encode(x="time:T", text="label:N"))
+        layers.append(alt.Chart(rule).mark_text(align="left", baseline="top", dx=4, color=colours["actual"]).encode(
+            x="time:T", y=alt.value(4), text="label:N"))
     return alt.layer(*layers).properties(height=260)
 
 
 def lanes_chart(patches, domain):
     x = alt.X("start:T", title=None, axis=x_axis, scale=alt.Scale(domain=domain))
     bars = alt.Chart(patches).mark_rect(opacity=0.55, cornerRadius=3).encode(
-        x=x, x2="end:T", y=alt.Y("lane:O", title="Patches", axis=alt.Axis(labels=False, ticks=False, minExtent=y_width)),
+        x=x, x2="end:T", y=alt.Y("lane:O", title=None, axis=alt.Axis(labels=False, ticks=False, domain=False, minExtent=y_width)),
         color=alt.Color("lane:N", legend=None, scale=alt.Scale(range=colours["lanes"])),
         tooltip=["patch:Q", alt.Tooltip("start:T", format="%a %H:%M"), alt.Tooltip("end:T", format="%a %H:%M")])
     labels = alt.Chart(patches).mark_text(fontSize=9, color="white").encode(
         x=alt.X("mid:T", scale=alt.Scale(domain=domain)), y=alt.Y("lane:O"), text="patch:Q"
     ).transform_calculate(mid="(toDate(datum.start) + toDate(datum.end)) / 2")
-    return (bars + labels).properties(height=70)
+    return (bars + labels).properties(height=120)
 
 
 def heatmap(attention, patches):
@@ -163,7 +164,7 @@ if shown >= 2:
     a, b = st.columns(2)
     a.metric("Week average (subtracted)", f"{row['mean']:,.0f} MW")
     b.metric("Week spread (divided by)", f"{row['std']:,.0f} MW")
-    st.altair_chart(week_chart(week, "scaled", "Rescaled demand", cutoff=cutoff, domain=domain), width="stretch")
+    st.altair_chart(week_chart(week, "scaled", "Rescaled demand", domain=domain), width="stretch")
     st.caption("RevIN subtracts the week's average and divides by its spread, so the model learns the shape of demand rather "
                "than its level, and copes when demand is higher in winter or drifts between years. The same numbers are "
                "used to scale the forecast back to MW at the end. Without it, coverage of the 80% range fell to 75.9% in "
