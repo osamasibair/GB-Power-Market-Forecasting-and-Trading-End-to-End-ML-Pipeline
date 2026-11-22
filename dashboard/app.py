@@ -11,6 +11,7 @@ pages = st.navigation({
     "Demand Forecasting": [
         st.Page("monitoring.py", title="Live", default=True),
         st.Page("transformer.py", title="Test Year"),
+        st.Page("inside_transformer.py", title="Inside The Transformer"),
     ],
     "Prices and Trading (LightGBM, Test Year)": [
         st.Page("price_forecast.py", title="Price Forecast"),
