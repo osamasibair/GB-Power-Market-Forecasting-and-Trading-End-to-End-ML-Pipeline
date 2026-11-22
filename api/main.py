@@ -12,7 +12,7 @@ from evaluate import metrics
 from predict import load_model, load_quantile_models, predict_day
 from train import split_date
 
-app = FastAPI(title="GB Electricity Demand Forecast")
+app = FastAPI(title="Demand Forecast")
 model = load_model()
 df = load_table("features")
 quantile = load_quantile_models()

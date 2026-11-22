@@ -4,7 +4,7 @@
 [![Deploy](https://github.com/osamasibair/GB-Power-Market-Forecasting-and-Trading-End-to-End-ML-Pipeline/actions/workflows/deploy.yml/badge.svg)](https://github.com/osamasibair/GB-Power-Market-Forecasting-and-Trading-End-to-End-ML-Pipeline/actions/workflows/deploy.yml)
 [![Daily forecast](https://github.com/osamasibair/GB-Power-Market-Forecasting-and-Trading-End-to-End-ML-Pipeline/actions/workflows/daily.yml/badge.svg?event=schedule)](https://github.com/osamasibair/GB-Power-Market-Forecasting-and-Trading-End-to-End-ML-Pipeline/actions/workflows/daily.yml)
 
-An end-to-end machine learning system that forecasts Great Britain’s electricity demand, prices and backtests battery trading, taken to production, then used as a testbed to compare gradient boosting with deep learning.
+A research project and a production system in one: it investigates where day-ahead forecast accuracy comes from (features, gradient boosting, deep learning trained from scratch, or pretrained foundation models) under one fair evaluation, and is engineered as an end-to-end machine learning pipeline that forecasts Great Britain's electricity demand and prices, then backtests battery trading on the price forecasts.
 
 **Live:** [API docs](https://electricity-api-xqiuvbbyca-nw.a.run.app/docs) · [Latest forecast](https://electricity-api-xqiuvbbyca-nw.a.run.app/forecast/latest) · [Dashboard](https://electricity-dashboard-xqiuvbbyca-nw.a.run.app) (demand forecasting, live and on the test year, plus price, spike and battery results on the test year)
 
