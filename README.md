@@ -48,7 +48,7 @@ The raw quantile models were overconfident, covering only half of actual values.
 
 ### Gradient boosting vs deep learning
 
-Can deep learning beat gradient boosting here? Three kinds of deep learning model were compared with LightGBM on the same days: PatchTST, a transformer implemented from the paper in PyTorch and trained from scratch on this data; Chronos-Bolt and Chronos 2, used zero shot; and Chronos 2 fine tuned on this data. The diagram shows PatchTST.
+Can deep learning beat gradient boosting here? Three kinds of deep learning model were compared with LightGBM on the same days: PatchTST, a transformer implemented from the paper in PyTorch and trained from scratch on this data; Chronos-Bolt and Chronos 2, used zero shot; and Chronos 2 fine tuned on this data. A ridge regression on LightGBM's own features was added as a linear baseline. The diagram shows PatchTST.
 
 ```mermaid
 flowchart TD
@@ -72,6 +72,7 @@ Every model sees the same information (demand up to 08:00 the day before, plus t
 | Naive baseline (same time last week) | 2,130 MW | 2,875 MW | 8.39% | — | — |
 | Chronos-Bolt small (zero shot, demand only) | 1,839 MW | 2,437 MW | 7.29% | 78.6% | 5,614 MW |
 | Chronos 2 (zero shot, demand only) | 1,673 MW | 2,266 MW | 6.72% | 79.9% | 5,242 MW |
+| Ridge regression (linear, same features as LightGBM) | 1,443 MW | 1,847 MW | 5.84% | 77.8% | 4,330 MW |
 | PatchTST (trained from scratch) | 1,368 MW | 1,793 MW | 5.61% | 77.7% | 4,135 MW |
 | Chronos-2 (zero shot, with weather and calendar) | 1,383 MW | 1,861 MW | 5.53% | 81.4% | 4,757 MW |
 | LightGBM (in production) | 1,246 MW | 1,647 MW | 5.08% | 80.2% | 4,035 MW |
@@ -88,6 +89,7 @@ Every model sees the same information (demand up to 08:00 the day before, plus t
 - **Weather matters to the pretrained model too.** On demand alone Chronos 2 scores 6.72%, 8% better than the older Chronos-Bolt; given the weather and calendar, 5.53%, a further 18% better.
 - **The best forecast blends gradient boosting with deep learning.** 35% LightGBM, 5% PatchTST and 60% fine-tuned Chronos 2 scores 4.36%, 14% lower error than LightGBM alone, with 80.4% coverage and intervals 14% narrower. With the other two fine-tuning runs, and the weights chosen again on the calibration year each time, the blend scores 4.31% and 4.29% with nearly the same weights (30/5/65 and 35/5/60), so neither the result nor the weights depend on one run. The 4.36% reported is the run fixed before the others, not the best of the three. Every choice was made on the calibration year: the fine tuned Chronos 2 over the zero shot one (4.01% vs 4.30% calibration MAPE for their best blends), and the weights. Weights chosen with hindsight on the test year would only reach 4.34%, so the choice transferred well. LightGBM keeps a third of the weight because its mistakes differ from the deep models'. PatchTST's share falls to 5% because fine tuned Chronos 2 covers most of what it added: without it the blend scores 4.02% on the calibration year and the same 4.36% on the test year.
 - **No other blend does meaningfully better.** Every blend of the five models with validation year forecasts (LightGBM, PatchTST and the three Chronos 2 versions), in steps of 5% (10,626 blends, `python src/ensemble.py --search-all`), was scored on the validation year. The best scored 4.007% there, against 4.01% for the three-way blend: a difference far below the variation between random seeds. The top blends form a flat plateau (all within 0.003 points), share the same shape (about 30 to 35% LightGBM, 55 to 60% fine tuned Chronos 2 and 5 to 10% PatchTST) and score 4.35 to 4.37% on the test year. The two zero-shot Chronos 2 versions get at most 10% between them, because their mistakes largely repeat the fine tuned version's. So the three-way blend is kept as the final model: no larger blend is meaningfully better, and every extra weight chosen on the same year adds risk of overfitting it.
+- **Most of LightGBM's accuracy comes from the features.** A ridge regression on exactly LightGBM's features (`src/ridge.py`), with its penalty chosen on the calibration year, scores 5.84%: it captures 77% of LightGBM's improvement over the baseline, so LightGBM's ability to learn non-linear effects, such as temperature mattering differently at different times of day, adds the remaining 23% (13% lower error than ridge). PatchTST, trained from scratch on raw history, beats the linear model by only 4% (5.61% vs 5.84%). Ridge's fixed width range under-covers (77.8%) despite being wider than LightGBM's, likely because its errors vary by time of day while its range doesn't.
 - **PatchTST beats the pretrained Chronos-Bolt by 23% but not LightGBM alone.** This matches what forecasting competitions such as M5 found: gradient boosting with good features is hard to beat on a few years of data, for a model trained from scratch.
 - **Letting each forecast half-hour choose what to look at helped most.** The papers head flattens the 27 patch summaries into one long vector, through a single layer holding 221,312 of the model's 347,525 parameters. Three heads were compared on the same days with `src/ablation.py`:
 
@@ -234,6 +236,7 @@ pip install -r requirements-research.txt
 python src/train_patchtst.py   # train PatchTST and compare it with LightGBM and Chronos on the same days
 python src/plot_patchtst.py    # draw the figures in docs/
 python src/ensemble.py         # blend LightGBM and PatchTST, choosing the weight on the calibration year
+python src/ridge.py            # ridge regression baseline on LightGBM's features (run after train_patchtst.py)
 python src/ablation.py pooling flatten mean attention   # compare settings, here the three heads
 python src/ablation.py weather 1 0 --seeds 42 1 2   # e.g. retrain with and without weather, three seeds each
 python src/tune_patchtst.py --trials 40   # tune PatchTST with Optuna on the calibration year only
@@ -342,6 +345,7 @@ flowchart LR
 | Transformer figures | `src/plot_patchtst.py` | Draws a forecast week, the learning curve and the attribution heatmap into `docs/` |
 | Ensemble and ablations | `src/ensemble.py`, `src/ablation.py` | Blends LightGBM, PatchTST and Chronos 2 with weights chosen on the calibration year, searches every blend of the models, and retrains PatchTST once per value of a setting over several seeds |
 | Tuning | `src/tune_patchtst.py` | Tunes PatchTSTs settings with Optuna, scored on the calibration year only |
+| Ridge baseline | `src/ridge.py` | A ridge regression on LightGBM's features, with its penalty chosen on the calibration year and a conformal 80% range |
 | Chronos-2 | `src/chronos2.py`, `notebooks/chronos2_finetune_colab.ipynb` | Forecasts with Chronos 2 zero shot (with and without weather and calendar) and fine tuned, with export and import for fine tuning on a cloud GPU |
 | Retrain | `src/retrain.py` | Checks a newly trained model against the baseline on the latest 8 weeks, then retrains the demand and interval models on all data and recalibrates the intervals |
 | Price features | `src/price_features.py` | Adds wind, solar, net demand and price lag features |
@@ -356,7 +360,7 @@ flowchart LR
 | Tracking | `src/tracking.py` | Logs each training runs settings, metrics and model files to MLflow, and registers the demand, price and spike models |
 | Predict | `src/predict.py` | Loads the saved models and forecasts a chosen day with interval |
 | Serve | `api/main.py` | FastAPI service, packaged with the `Dockerfile` and run alongside PostgreSQL with `docker-compose.yml` |
-| Test | `tests/` | Unit tests for metrics, features, the spike definition, the battery, the monitoring, the database, the briefing (using a mocked Claude client), the transformer (no look ahead in its windows, non crossing quantiles, reproducibility, saving and loading), Chronos 2 (inputs stop at the 08:00 cutoff, forecasts made on another machine are matched to the right days) and the blends, plus API tests |
+| Test | `tests/` | Unit tests for metrics, features, the spike definition, the battery, the monitoring, the database, the briefing (using a mocked Claude client), the transformer (no look ahead in its windows, non crossing quantiles, reproducibility, saving and loading), Chronos 2 (inputs stop at the 08:00 cutoff, forecasts made on another machine are matched to the right days) the ridge regression baseline (calendar encoding, penalty chosen on the calibration year) and the blends, plus API tests |
 | CI | `.github/workflows/tests.yml` | Lints, starts PostgreSQL, runs the tests with coverage, and starts the API and dashboard with Docker Compose on every push |
 | Scheduled retraining | `.github/workflows/retrain.yml` | Every Monday, downloads the latest data, rebuilds the features and runs the retraining, publishing if the quality gate is passed |
 | Deploy | `.github/workflows/deploy.yml` | After CI passes on `main`, or after a retrain, builds and pushes the image and deploys the API and dashboard to cloud run |

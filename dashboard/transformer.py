@@ -15,6 +15,7 @@ names = {
     "chronos2_covariates": "Chronos-2 (zero shot, with weather)",
     "chronos2_finetuned": "Chronos-2 (fine tuned, with weather)",
     "patchtst": "PatchTST (trained from scratch)",
+    "ridge": "Ridge regression (linear, same features as LightGBM)",
     "lightgbm": "LightGBM",
     "blend": "Best blend (35% LightGBM, 5% PatchTST, 60% fine tuned Chronos-2)",
 }
