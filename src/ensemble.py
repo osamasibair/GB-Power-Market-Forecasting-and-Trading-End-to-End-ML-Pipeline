@@ -84,8 +84,17 @@ if __name__ == "__main__":
     parser.add_argument("--third", default="chronos2_finetuned", help="the third model to try in a three way blend")
     parser.add_argument("--search-all", action="store_true",
                         help="also try every blend of every model with calibration year forecasts, to check nothing beats the three way blend")
+    parser.add_argument("--lightgbm", default="lightgbm",
+                        help="the LightGBM forecasts to blend: lightgbm (train.py's settings) or lightgbm_tuned (src/tune_lightgbm.py). "
+                             "The dashboard tables are only saved for lightgbm")
     args = parser.parse_args()
     calib, test = load_table("transformer_calibration"), load_table("transformer_forecasts")
+    if args.lightgbm != "lightgbm":
+        for frame in (calib, test):
+            for part in ("", "_low", "_high"):
+                frame[f"lightgbm{part}"] = frame[f"{args.lightgbm}{part}"]
+        print(f"blending {args.lightgbm} as LightGBM, without saving the dashboard tables\n")
+    save = args.lightgbm == "lightgbm"
     table = weight_table(calib, test)
     chosen = best_weight(table)
     by_weight = table.set_index("weight")
@@ -100,8 +109,9 @@ if __name__ == "__main__":
     print(f"\nchosen blend: {1 - chosen:.0%} LightGBM + {chosen:.0%} PatchTST")
     print(f"test MAPE: LightGBM {lightgbm['test_mape']:.2f}%, PatchTST {patchtst['test_mape']:.2f}%, blend {ensemble['test_mape']:.2f}%")
 
-    save_table(table, "ensemble_weights")
-    print("saved ensemble_weights for the dashboard")
+    if save:
+        save_table(table, "ensemble_weights")
+        print("saved ensemble_weights for the dashboard")
 
     log_run(
         experiment="demand-ensemble",
@@ -140,5 +150,6 @@ if __name__ == "__main__":
         search = all_blends(calib, test, models)
         print(f"\nevery blend of {', '.join(models)} in steps of 5% ({len(search):,} blends), best five on the calibration year:")
         print(search.head(5)[models + ["calibration_mape", "test_mape", "test_coverage"]].round(3).to_string(index=False))
-        save_table(search, "ensemble_search")
-        print("saved ensemble_search")
+        if save:
+            save_table(search, "ensemble_search")
+            print("saved ensemble_search")
