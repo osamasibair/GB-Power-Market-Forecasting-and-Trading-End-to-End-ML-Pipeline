@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from gb_weather import regions as weather_points
+
 raw = Path("data/raw")
 
 demand_min, demand_max = 10000, 60000
@@ -32,15 +34,24 @@ def check_demand(df):
     return problems
 
 def check_weather(df):
+    """Checks the weather at every region's point: all regions present, each with the same unbroken hourly series."""
     problems = []
-    times = pd.to_datetime(df["time"])
-    gaps = times.diff().dropna()
-    irregular = (gaps != pd.Timedelta(hours=1)).sum()
-    if irregular > 0:
-        problems.append(f"{irregular} gaps or overlaps in hourly sequence")
-    nulls = df[["temperature_2m", "wind_speed_10m"]].isna().sum().sum()
-    if nulls > 0:
-        problems.append(f"{nulls} missing weather values")
+    expected = set(weather_points["region"])
+    missing = expected - set(df["region"])
+    if missing:
+        problems.append(f"no weather for {', '.join(sorted(missing))}")
+    lengths = df.groupby("region").size()
+    if lengths.nunique() > 1:
+        problems.append(f"regions have different numbers of hours: {lengths.min()} to {lengths.max()}")
+    for region, part in df.groupby("region"):
+        gaps = pd.to_datetime(part["time"]).diff().dropna()
+        irregular = (gaps != pd.Timedelta(hours=1)).sum()
+        if irregular > 0:
+            problems.append(f"{region}: {irregular} gaps or overlaps in hourly sequence")
+    nulls = df[["temperature_2m", "wind_speed_10m", "shortwave_radiation"]].isna().sum()
+    for column, count in nulls[nulls > 0].items():
+        regions = ", ".join(sorted(df.loc[df[column].isna(), "region"].unique()))
+        problems.append(f"{count} missing {column} values ({regions})")
     outside = df[(df["temperature_2m"] < temp_min) | (df["temperature_2m"] > temp_max)]
     if len(outside) > 0:
         n = len(outside)

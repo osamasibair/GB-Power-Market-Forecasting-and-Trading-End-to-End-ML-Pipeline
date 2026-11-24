@@ -9,6 +9,9 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from gb_weather import regions as weather_points
+from gb_weather import weather_model
+
 raw = Path("data/raw")
 elexon = "https://data.elexon.co.uk/bmrs/api/v1/demand/outturn"
 weather = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -41,17 +44,31 @@ def fetch_weather(start, end, lat=51.5072, lon=-0.1276):
         "start_date": start,
         "end_date": end,
         "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation",
+        "models": weather_model,
         "timezone": "UTC",
     }
     response = session.get(weather, params=query, timeout=60)
     response.raise_for_status()
     return pd.DataFrame(response.json()["hourly"])
 
+def fetch_weather_points(fetch, **dates):
+    """Weather at every region's point (see gb_weather.py), one block of rows per region, using `fetch`
+    (fetch_weather or fetch_weather_forecast) with the given dates."""
+    frames = []
+    for point in weather_points.itertuples():
+        frame = fetch(lat=point.latitude, lon=point.longitude, **dates)
+        frame.insert(1, "region", point.region)
+        frames.append(frame)
+        print(f"weather: {point.region} ({point.city})")
+        time.sleep(0.5)
+    return pd.concat(frames, ignore_index=True)
+
 def fetch_weather_forecast(past_days, forecast_days, lat=51.5072, lon=-0.1276):
     query = {
         "latitude": lat,
         "longitude": lon,
         "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation",
+        "models": weather_model,
         "timezone": "UTC",
         "past_days": past_days,
         "forecast_days": forecast_days,
@@ -84,13 +101,15 @@ def fetch_generation(start, end):
     return fetch_weekly(wind_solar, start, end, "generation")
 
 if __name__ == "__main__":
-    start, end = "2023-01-01", os.environ.get("DATA_END", "2026-09-01")
+    start, end = "2022-03-01", os.environ.get("DATA_END", "2026-09-01")  # the Met Office weather archive starts in March 2022
+    market_start = "2023-01-01"  #the price studies keep their original period
     raw.mkdir(parents=True, exist_ok=True)
     if not (raw / "generation.csv").exists():
-        fetch_generation(start, end).to_csv(raw / "generation.csv", index=False)
+        fetch_generation(market_start, end).to_csv(raw / "generation.csv", index=False)
     if not (raw / "demand.csv").exists(): fetch_demand(start, end).to_csv(raw / "demand.csv", index=False)
-    if not (raw / "weather.csv").exists(): fetch_weather(start, end).to_csv(raw / "weather.csv", index=False)
-    if not (raw / "prices.csv").exists(): fetch_prices(start, end).to_csv(raw / "prices.csv", index=False)
+    if not (raw / "weather.csv").exists():
+        fetch_weather_points(fetch_weather, start=start, end=end).to_csv(raw / "weather.csv", index=False)
+    if not (raw / "prices.csv").exists(): fetch_prices(market_start, end).to_csv(raw / "prices.csv", index=False)
     print("saved to data/raw")
 
 

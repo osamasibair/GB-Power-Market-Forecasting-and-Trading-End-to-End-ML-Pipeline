@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from db import save_table
+from gb_weather import gb_average
 
 raw = Path("data/raw")
 
@@ -22,8 +23,9 @@ def load_demand():
     return df
 
 def load_weather():
-    df = pd.read_csv(raw / "weather.csv", parse_dates=["time"])
-    df = df.set_index("time").sort_index()
+    """GB-wide weather: the weighted average of every region's weather (gb_weather.py), made half hourly."""
+    points = pd.read_csv(raw / "weather.csv", parse_dates=["time"])
+    df = gb_average(points)
     df = df.resample("30min").interpolate(method="time")
     df.index.name = "timestamp"
     return df

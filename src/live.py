@@ -5,7 +5,8 @@ from anthropic import APIError
 from briefing import write_briefing
 from db import load_table, save_table
 from features import build_features
-from ingest import fetch_demand, fetch_weather_forecast
+from gb_weather import gb_average
+from ingest import fetch_demand, fetch_weather_forecast, fetch_weather_points
 from monitor import daily_report, live_adjustment
 from predict import load_model, load_quantile_models, predict_day
 
@@ -21,9 +22,10 @@ def latest_demand(start, end):
 
 
 def latest_weather():
-    raw = fetch_weather_forecast(past_days=history_days, forecast_days=3)
+    """GB-wide weather for the past weeks and the next days, made the same way as the training data's."""
+    raw = fetch_weather_points(fetch_weather_forecast, past_days=history_days, forecast_days=3)
     raw["time"] = pd.to_datetime(raw["time"])
-    return raw.set_index("time").sort_index().resample("30min").interpolate(method="time")
+    return gb_average(raw).resample("30min").interpolate(method="time")
 
 
 if __name__ == "__main__":
