@@ -39,18 +39,6 @@ def test_each_choice_of_features_has_its_own_study():
     assert storage_for({"solar": 0, "christmas": 0}).endswith("optuna_lightgbm_2years_no_solar_no_christmas.db")
 
 
-def check_on_two_years():
-    """The feature check on synthetic data with two short validation years (run in its own process, see below)."""
-    import tune_lightgbm
-    from validation import before, fold_rows
-
-    df = make_features(days=150)
-    tune_lightgbm.seeds = [42, 1]
-    starts = [df.index[80 * 48], df.index[110 * 48], df.index[-1]]
-    years = [(before(df, a), fold_rows(df, a, b)) for a, b in itertools.pairwise(starts)]
-    return tune_lightgbm.check_features({**defaults, "n_estimators": 30}, years)
-
-
 def test_the_feature_check_scores_every_combination_by_the_average_of_both_years():
     df = make_features(days=150)
     starts = [df.index[80 * 48], df.index[110 * 48], df.index[-1]]

@@ -150,7 +150,7 @@ if __name__ == "__main__":
 
     table = pd.DataFrame(results)
     print(f"\n{args.setting:>12} {'parameters':>11} {'loss year 1':>12} {'loss year 2':>12} {'average (decides)':>22} "
-f"{'MAPE':>15}   ({len(args.seeds)} seed{'s' if len(args.seeds) > 1 else ''}{', tuned' if args.tuned else ''}"
+          f"{'MAPE':>15}   ({len(args.seeds)} seed{'s' if len(args.seeds) > 1 else ''}{', tuned' if args.tuned else ''}"
           f"{', from the design' if args.from_design else ''})")
     for _, r in table.iterrows():
         print(f"{r['value']:>12} {r['parameters']:>11,.0f} {r['loss_year1']:>12.4f} {r['loss_year2']:>12.4f} "
