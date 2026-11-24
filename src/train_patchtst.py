@@ -118,6 +118,22 @@ def chronos(df, calib_days, test_days, actual_calib, actual_test):
     return summary(actual_test, forecasts["chronos"], forecasts["chronos_low"], forecasts["chronos_high"]), forecasts  
 
 
+def keep_other_models(table, name):
+    """`table` with the columns of models this script doesn't make (Chronos-2, ridge, tuned LightGBM), carried over from
+    the saved table `name`, so retraining PatchTST doesn't mean rerunning or re-importing them."""
+    try:
+        old = load_table(name)
+    except ValueError:
+        return table
+    if not old.index.equals(table.index):
+        print(f"{name} covers different days, so the other models' columns are dropped: rerun them")
+        return table
+    for column in old.columns:
+        if column not in table:
+            table[column] = old[column].to_numpy()
+    return table
+
+
 def forecast_table(index, actual, forecasts):  
     """Every model's test-period forecasts in one table, for the dashboard.""" 
     return pd.DataFrame({"actual": actual, **forecasts}, index=index) 
@@ -162,9 +178,11 @@ if __name__ == "__main__":
     model.save(models / "patchtst.pt", adjustment=adjustment, valid_losses=early_losses, split_date=split_date)
     print("saved models/patchtst.pt")
 
-    save_table(forecast_table(df.index[rows(test_days)], actual_test, forecasts), "transformer_forecasts") 
+    save_table(keep_other_models(forecast_table(df.index[rows(test_days)], actual_test, forecasts), "transformer_forecasts"),
+               "transformer_forecasts")
     calibration = {**first["calibration"], **patchtst_calibration}
-    save_table(forecast_table(df.index[rows(calib_days)], actual_calib, calibration), "transformer_calibration")
+    save_table(keep_other_models(forecast_table(df.index[rows(calib_days)], actual_calib, calibration), "transformer_calibration"),
+               "transformer_calibration")
     save_table(pd.DataFrame({"loss": early_losses}, index=range(1, len(early_losses) + 1)), "transformer_training") 
     print("saved transformer_forecasts and transformer_training for the dashboard") 
 

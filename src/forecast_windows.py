@@ -18,10 +18,18 @@ def covariate_matrix(df):
         columns += [np.sin(angle), np.cos(angle)]
     return np.stack(columns, axis=1).astype(np.float32)
 
-def covariate_columns(use_weather=True):
-    """Which columns of covariate_matrix to use. all of them, or without tomorrows weather (calendar only)."""
+
+def covariate_columns(use_weather=True, solar=True, christmas=True):
+    """Which columns of covariate_matrix to use: all of them, or without tomorrows weather (calendar only), without
+    the sunshine, or without the Christmas flag."""
     names = covariates + [f"{kind}_{name}" for name in cycles for kind in ("sin", "cos")]
-    return np.array([i for i, name in enumerate(names) if use_weather or name not in weather])
+    dropped = set() if use_weather else set(weather)
+    if not solar:
+        dropped.add("shortwave_radiation")
+    if not christmas:
+        dropped.add("is_christmas")
+    return np.array([i for i, name in enumerate(names) if name not in dropped])
+
 
 def windows(index, first=None, last=None, stride=1):
     """Positions where a forecast window starts: a full week of history, then the gap, then 48 half hours in [first, last)."""

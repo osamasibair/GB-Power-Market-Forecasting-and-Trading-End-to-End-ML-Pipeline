@@ -6,4 +6,4 @@ models/
 __pycache__/
 .pytest_cache/
 .vscode/
-.ruff_cache/
+.ruff_cache/logs/

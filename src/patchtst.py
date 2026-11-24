@@ -127,7 +127,7 @@ def pinball_loss(predicted, actual, scale):
 
 
 defaults = {"patch_len": 24, "stride": 12, "d_model": 64, "heads": 4, "layers": 2, "dropout": 0.1, "hidden": 128,
-            "pooling": "attention", "lags": 0, "revin": 1, "weather": 1, "learning_rate": 1e-3, "weight_decay": 1e-2, "batch_size": 128, "max_epochs": 40,
+            "pooling": "attention", "lags": 0, "revin": 1, "weather": 1, "solar": 1, "christmas": 1, "learning_rate": 1e-3, "weight_decay": 1e-2, "batch_size": 128, "max_epochs": 40,
             "patience": 6, "warmup": 0.05, "train_stride": 2, "seed": 42}
 architecture = ["patch_len", "stride", "d_model", "heads", "layers", "dropout", "hidden", "pooling", "lags", "revin"]
 
@@ -145,7 +145,7 @@ class PatchTSTForecaster:
         return torch.from_numpy(history), torch.from_numpy(future), torch.from_numpy(actual)
 
     def columns(self):
-        return covariate_columns(bool(self.settings["weather"]))
+        return covariate_columns(bool(self.settings["weather"]), bool(self.settings["solar"]), bool(self.settings["christmas"]))
 
     def loss(self, history, future, actual):
         scale = history.std(dim=1, unbiased=False) + 1e-5
@@ -223,7 +223,7 @@ class PatchTSTForecaster:
     @classmethod
     def load(cls, path):
         saved = torch.load(path)
-        model = cls(**{"pooling": "flatten", "lags": 0, "revin": 1, "weather": 1, **saved["settings"]})
+        model = cls(**{"pooling": "flatten", "lags": 0, "revin": 1, "weather": 1, "solar": 1, "christmas": 1, **saved["settings"]})
         model.cov_mean = np.array(saved["cov_mean"], dtype=np.float32)
         model.cov_std = np.array(saved["cov_std"], dtype=np.float32)
         model.best_epochs = saved["best_epochs"]

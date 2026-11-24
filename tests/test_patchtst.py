@@ -225,6 +225,8 @@ def test_unknown_settings_are_rejected():
 def test_covariate_columns_without_weather_drop_temperature_sunshine_and_heating_demand():
     assert list(covariate_columns(True)) == list(range(11))
     assert list(covariate_columns(False)) == [3, 4, 5, 6, 7, 8, 9, 10]
+    assert list(covariate_columns(True, solar=False)) == [0, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert list(covariate_columns(True, christmas=False)) == [0, 1, 2, 3, 5, 6, 7, 8, 9, 10]
 
 
 def test_covariates_include_sin_and_cos_of_the_calendar():
@@ -253,3 +255,16 @@ def test_forecast_table_keeps_every_model_next_to_the_actual_demand():
     table = forecast_table(index, np.array([1.0, 2, 3, 4]), {"lightgbm": np.zeros(4), "patchtst": np.ones(4)})
     assert list(table.columns) == ["actual", "lightgbm", "patchtst"]
     assert table.index.equals(index) and table["actual"].iloc[-1] == 4
+
+
+def test_retraining_patchtst_keeps_the_other_models_columns(monkeypatch):
+    import train_patchtst
+
+    index = pd.date_range("2025-09-01", periods=4, freq="30min")
+    old = pd.DataFrame({"actual": 1.0, "patchtst": 0.0, "ridge": [5.0, 6, 7, 8]}, index=index)
+    monkeypatch.setattr(train_patchtst, "load_table", lambda name: old)
+    new = train_patchtst.forecast_table(index, np.ones(4), {"patchtst": np.full(4, 2.0)})
+    kept = train_patchtst.keep_other_models(new, "transformer_forecasts")
+    assert kept["patchtst"].tolist() == [2.0] * 4 and kept["ridge"].tolist() == [5.0, 6, 7, 8]
+    other_days = train_patchtst.forecast_table(index + pd.Timedelta("1D"), np.ones(4), {"patchtst": np.full(4, 2.0)})
+    assert "ridge" not in train_patchtst.keep_other_models(other_days, "transformer_forecasts")
