@@ -13,10 +13,20 @@ def make_raw(start, days): #helper, not test
         "shortwave_radiation": 0.0,
     }, index=index)
 
-def test_no_missing_values_and_wind_dropped():
+def test_no_missing_values_and_wind_kept_as_a_candidate_input():
     out = build_features(make_raw("2024-01-08", 14))
     assert out.isna().sum().sum() == 0
-    assert "wind_speed_10m" not in out.columns
+    assert "wind_speed_10m" in out.columns
+
+
+def test_recent_temperature_is_the_mean_of_the_last_24_and_72_hours():
+    raw = make_raw("2024-01-08", 14)
+    raw["temperature_2m"] = np.arange(len(raw), dtype=float)
+    out = build_features(raw)
+    t = out.index[100]
+    position = raw.index.get_loc(t)
+    assert out.loc[t, "temperature_24h"] == raw["temperature_2m"].iloc[position - 47:position + 1].mean()
+    assert out.loc[t, "temperature_72h"] == raw["temperature_2m"].iloc[position - 143:position + 1].mean()
 
 def test_period_runs_1_to_48():
     out = build_features(make_raw("2024-01-08", 14))

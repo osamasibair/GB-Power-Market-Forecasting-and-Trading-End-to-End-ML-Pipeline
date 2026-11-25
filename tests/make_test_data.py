@@ -24,6 +24,8 @@ raw = pd.DataFrame({
     "temperature_2m": 15 + 5 * np.sin((hours - 9) / 24 * 2 * np.pi),
     "wind_speed_10m": 5.0,
     "shortwave_radiation": np.clip(600 * np.sin((hours - 6) / 12 * np.pi), 0, None),
+    "relative_humidity_2m": 75.0,
+    "cloud_cover": 50.0,
 }, index=index)
 df = build_features(raw)
 save_table(df, "features")

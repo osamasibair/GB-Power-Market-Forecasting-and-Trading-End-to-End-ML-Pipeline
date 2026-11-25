@@ -19,7 +19,10 @@ def build_features(df):
     df["demand_lag_recent"] = df["demand"].shift(48).where(local.hour < 8, df["demand"].shift(96))
     df["demand_lag_336"] = df["demand"].shift(336)
     df["demand_roll_96"] = df["demand"].shift(96).rolling(48).mean()
-    df = df.drop(columns=["wind_speed_10m"])
+    # recent temperature: buildings warm up and cool down slowly, so demand follows the last day or days of temperature
+    # as well as the current one (the "recency effect"). Weather comes from forecasts, known ahead like temperature_2m
+    df["temperature_24h"] = df["temperature_2m"].rolling(48).mean()
+    df["temperature_72h"] = df["temperature_2m"].rolling(144).mean()
     return df.dropna(subset=df.columns.drop("demand"))
 
 if __name__ == "__main__":

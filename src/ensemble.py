@@ -85,7 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("--search-all", action="store_true",
                         help="also try every blend of every model with calibration year forecasts, to check nothing beats the three way blend")
     parser.add_argument("--lightgbm", default="lightgbm",
-                        help="the LightGBM forecasts to blend: lightgbm (train.py's settings) or lightgbm_tuned (src/tune_lightgbm.py). "
+                        help="the LightGBM forecasts to blend: lightgbm (train.py's settings) or lightgbm_tuned (src/tune_boosting.py). "
                              "The dashboard tables are only saved for lightgbm")
     args = parser.parse_args()
     calib, test = load_table("transformer_calibration"), load_table("transformer_forecasts")

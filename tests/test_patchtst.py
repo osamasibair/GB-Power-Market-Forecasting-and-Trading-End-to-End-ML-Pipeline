@@ -13,6 +13,7 @@ from forecast_windows import (
     gap_steps,
     history_steps,
     horizon,
+    longest_history,
     windows,
 )
 from patchtst import PatchTST, PatchTSTForecaster, RevIN, chronos_forecast, same_time
@@ -27,7 +28,8 @@ def make_features(start="2024-01-01", days=120, seed=0):
     daily = np.sin(2 * np.pi * (step % 48 - 14) / 48)
     demand = 28000 + 5000 * daily - 250 * temperature - 2500 * (index.dayofweek >= 5) + rng.normal(0, 300, len(index))
     raw = pd.DataFrame({"demand": demand, "temperature_2m": temperature, "wind_speed_10m": 5.0,
-                        "shortwave_radiation": np.clip(daily, 0, None) * 300}, index=index)
+                        "shortwave_radiation": np.clip(daily, 0, None) * 300, "relative_humidity_2m": 75.0,
+                        "cloud_cover": 50.0}, index=index)
     return build_features(raw)
 
 
@@ -222,16 +224,22 @@ def test_unknown_settings_are_rejected():
         PatchTSTForecaster(layer=3)
 
 
-def test_covariate_columns_without_weather_drop_temperature_sunshine_and_heating_demand():
-    assert list(covariate_columns(True)) == list(range(11))
-    assert list(covariate_columns(False)) == [3, 4, 5, 6, 7, 8, 9, 10]
-    assert list(covariate_columns(True, solar=False)) == [0, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    assert list(covariate_columns(True, christmas=False)) == [0, 1, 2, 3, 5, 6, 7, 8, 9, 10]
+def test_covariate_columns_without_weather_keep_only_the_calendar():
+    from forecast_windows import names
+
+    def kept(columns):
+        return [names[i] for i in columns]
+
+    assert kept(covariate_columns(True)) == names and len(names) == 10 + 6
+    assert kept(covariate_columns(False)) == ["is_holiday", "is_christmas"] + names[-6:]
+    assert "shortwave_radiation" not in kept(covariate_columns(True, solar=False))
+    assert "is_christmas" not in kept(covariate_columns(True, christmas=False))
+    assert len(covariate_columns(True, solar=False, christmas=False)) == 14
 
 
 def test_covariates_include_sin_and_cos_of_the_calendar():
     df = make_features(days=10)
-    assert covariate_matrix(df).shape == (len(df), 5 + 2 * 3)
+    assert covariate_matrix(df).shape == (len(df), 10 + 2 * 3)
 
 
 def test_chronos_forecast_uses_only_history_before_the_cutoff_and_keeps_the_forecast_day():
@@ -268,3 +276,52 @@ def test_retraining_patchtst_keeps_the_other_models_columns(monkeypatch):
     assert kept["patchtst"].tolist() == [2.0] * 4 and kept["ridge"].tolist() == [5.0, 6, 7, 8]
     other_days = train_patchtst.forecast_table(index + pd.Timedelta("1D"), np.ones(4), {"patchtst": np.full(4, 2.0)})
     assert "ridge" not in train_patchtst.keep_other_models(other_days, "transformer_forecasts")
+
+
+def test_a_longer_history_reads_more_patches_and_keeps_quantiles_in_order():
+    net = PatchTST(11, pooling="attention", lags=1, history_days=14)
+    assert net.position.shape[1] == (14 * 48 - 24) // 12 + 1
+    out = net(torch.randn(4, 14 * 48) * 3000 + 30000, torch.randn(4, horizon, 11))
+    assert out.shape == (4, horizon, 3) and (out[..., 0] <= out[..., 1]).all() and (out[..., 1] <= out[..., 2]).all()
+
+
+def test_lags_come_from_the_end_of_any_history_length():
+    history = torch.arange(2 * 14 * 48, dtype=torch.float32).reshape(2, -1)
+    lags = same_time(history)
+    end = 14 * 48 + gap_steps
+    assert torch.equal(lags[0, :, 0], history[0, end - 96:end - 96 + horizon])
+    assert torch.equal(lags[0, :, 1], history[0, end - 336:end - 336 + horizon])
+
+
+def test_history_days_outside_the_compared_lookbacks_are_rejected():
+    with pytest.raises(ValueError, match="history_days"):
+        PatchTST(11, history_days=10)
+
+
+def test_the_forecaster_reads_its_own_history_length():
+    df = make_features(days=120)
+    train = windows(df.index, stride=16, history=longest_history)
+    model = PatchTSTForecaster(max_epochs=1, d_model=16, hidden=32, history_days=21).fit(df, train)
+    history, _, _ = model.tensors(df, day_windows(df.index)[-2:])
+    assert history.shape == (2, 21 * 48)
+    assert model.predict(df, day_windows(df.index)[-2:]).shape == (2, horizon, 3)
+
+
+def test_windows_for_training_leave_room_for_the_longest_history():
+    df = make_features(days=120)
+    assert windows(df.index, history=longest_history).min() == longest_history + gap_steps
+
+
+def test_a_window_without_enough_history_is_refused():
+    df = make_features(days=120)
+    with pytest.raises(ValueError, match="history"):
+        arrays(df, windows(df.index)[:1], history=14 * 48)
+
+
+def test_models_saved_before_history_days_existed_load_with_a_week(tmp_path):
+    df = make_features(days=60)
+    model = PatchTSTForecaster(max_epochs=1, d_model=16, hidden=32).fit(df, windows(df.index, stride=16))
+    model.settings.pop("history_days")
+    model.save(tmp_path / "old.pt")
+    loaded, _ = PatchTSTForecaster.load(tmp_path / "old.pt")
+    assert loaded.history() == history_steps

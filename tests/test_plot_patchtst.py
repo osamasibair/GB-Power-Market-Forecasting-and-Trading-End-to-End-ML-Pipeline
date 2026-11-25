@@ -15,7 +15,8 @@ def make_features(days=40):
     index = pd.date_range("2025-11-01", periods=days * 48, freq="30min")
     daily = np.sin(2 * np.pi * (np.arange(len(index)) % 48 - 14) / 48)
     raw = pd.DataFrame({"demand": 28000 + 5000 * daily, "temperature_2m": 8.0, "wind_speed_10m": 5.0,
-                        "shortwave_radiation": np.clip(daily, 0, None) * 300}, index=index)
+                        "shortwave_radiation": np.clip(daily, 0, None) * 300, "relative_humidity_2m": 75.0,
+                        "cloud_cover": 50.0}, index=index)
     return build_features(raw)
 
 

@@ -2,7 +2,8 @@
 Britain (the 9 English regions, Wales and Scotland), averaged with weights that follow what each variable does to
 national demand.
 
-- Temperature and wind speed are weighted by each region's population, since heating and cooling follow people.
+- Temperature, wind speed, humidity and cloud cover are weighted by each region's population, since heating, cooling
+  and lighting follow people.
 - Sunshine (shortwave radiation) is weighted by each region's installed solar capacity, since sunshine lowers the
   demand the grid sees through rooftop and other embedded solar panels, and that depends on where the panels are.
 
@@ -44,8 +45,9 @@ regions = pd.DataFrame([
     ("Scotland", "S92000003", "Scotland", "Glasgow", 55.8642, -4.2518),
 ], columns=["region", "ons_code", "desnz_name", "city", "latitude", "longitude"])
 
-by_population = ["temperature_2m", "wind_speed_10m"]
+by_population = ["temperature_2m", "wind_speed_10m", "relative_humidity_2m", "cloud_cover"]
 by_solar = ["shortwave_radiation"]
+variables = by_population + by_solar  # every weather variable downloaded for each region
 
 
 def population():

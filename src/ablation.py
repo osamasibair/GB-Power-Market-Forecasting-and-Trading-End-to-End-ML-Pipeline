@@ -4,7 +4,7 @@ each validation year (each year forecast by a model trained only on the data bef
 loss averaged over both years and the seeds wins. Results go to the transformer_ablation table (one row per setting and
 value) and to the MLflow experiment demand-patchtst-ablation. The test year is never used here.
     python src/ablation.py pooling flatten mean attention --seeds 42 1 2 3 4
-After the design settings have been compared (pooling, revin, lags), choose them all and save them to
+After the design settings have been compared (pooling, revin, lags, history_days), choose them all and save them to
 models/patchtst_design.json for src/tune_patchtst.py:
     python src/ablation.py --decide"""
 import argparse
@@ -18,9 +18,9 @@ from tracking import log_run
 from train_patchtst import base_settings
 from validation import patchtst_years
 
-# the sunshine and Christmas inputs aren't chosen here: every model gets the same inputs, chosen on the validation years
-# by LightGBM's feature check (src/tune_lightgbm.py --check-features), so differences between models come from the models
-design_settings = ["pooling", "revin", "lags"]
+# the weather and calendar inputs aren't chosen here: every model gets all of them, with no selection
+# (forecast_windows.known_inputs), so differences between models come from the models
+design_settings = ["pooling", "revin", "lags", "history_days"]
 design_path = Path("models") / "patchtst_design.json"
 seeds = [42, 1, 2, 3, 4]
 min_seeds = len(seeds)
@@ -135,7 +135,7 @@ if __name__ == "__main__":
         if not design_path.exists():
             raise SystemExit(f"{design_path} not found, run python src/ablation.py --decide first")
         base = {**base, **json.loads(design_path.read_text())}
-        print(f"starting from the design in {design_path}: { {k: base[k] for k in design_settings} }")
+        print(f"starting from the design in {design_path}: { {k: base[k] for k in design_settings if k in base} }")
     results = []
     for value in map(parse, args.values):
         runs = []
@@ -153,8 +153,8 @@ if __name__ == "__main__":
           f"{'MAPE':>15}   ({len(args.seeds)} seed{'s' if len(args.seeds) > 1 else ''}{', tuned' if args.tuned else ''}"
           f"{', from the design' if args.from_design else ''})")
     for _, r in table.iterrows():
-        print(f"{r['value']:>12} {r['parameters']:>11,.0f} {r['loss_year1']:>12.4f} {r['loss_year2']:>12.4f} "
-              f"{r['validation_loss']:>13.4f} ± {r['validation_loss_std']:.4f} {r['mape']:>7.2f}% ± {r['mape_std']:.2f}")
+        print(f"{r['value']:>12} {r['parameters']:>11,.0f} {r['loss_year1']:>9.1f} MW {r['loss_year2']:>9.1f} MW "
+              f"{r['validation_loss']:>10.1f} ± {r['validation_loss_std']:.1f} MW {r['mape']:>7.2f}% ± {r['mape_std']:.2f}")
 
     try:
         old = load_table("transformer_ablation").reset_index(drop=True)

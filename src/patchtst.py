@@ -11,8 +11,8 @@ from forecast_windows import (
     covariate_columns,
     covariate_matrix,
     gap_steps,
-    history_steps,
     horizon,
+    lookbacks,
 )
 
 quantiles = (0.1, 0.5, 0.9)
@@ -25,7 +25,7 @@ lag_steps = (96, 336)  # the same half hour 2 days and 7 days earlier, both insi
 def same_time(history):
     """For each of tomorrow's 48 half hours, the demand at the same half hour 2 days and 7 days earlier, taken from the
     history window, shape (batch, 48, 2). Same time yesterday isn't used, history stops at 08:00 the day before."""
-    end = history_steps + gap_steps
+    end = history.shape[1] + gap_steps
     return torch.stack([history[:, end - lag:end - lag + horizon] for lag in lag_steps], dim=-1)
 
 
@@ -48,15 +48,15 @@ class RevIN(nn.Module):
 
 
 class PatchTST(nn.Module):
-    """The transformer reads the past week as 27 overlapping patches. `pooling` decides how those 27 patch summaries
-    become forecasts for each of tomorrow's 48 half hours:
+    """The transformer reads the past `history_days` days as overlapping patches (27 for a week). `pooling` decides how
+    those patch summaries become forecasts for each of tomorrow's 48 half hours:
     - "flatten": join them into one long vector and pass it through a large linear layer, as in the PatchTST paper
     - "mean": average them into one summary of the week
     - "attention": each forecast half hour builds a query from its time of day, weather and calendar, and uses
       cross attention to pick the patches it needs, so every half hour gets its own summary of the week"""
 
     def __init__(self, n_covariates, patch_len=24, stride=12, d_model=64, heads=4, layers=2, dropout=0.1, hidden=128,
-                 pooling="attention", lags=0, revin=1):
+                 pooling="attention", lags=0, revin=1, history_days=7):
         super().__init__()
         if pooling not in poolings:
             raise ValueError(f"pooling must be one of {poolings}, not {pooling!r}")
@@ -66,7 +66,7 @@ class PatchTST(nn.Module):
             raise ValueError(f"revin must be 0 or 1, not {revin!r}")
         self.lags, self.use_revin = lags, revin
         self.patch_len, self.stride, self.pooling = patch_len, stride, pooling
-        n_patches = (history_steps - patch_len) // stride + 1
+        n_patches = (history_days * 48 - patch_len) // stride + 1
         self.revin = RevIN()
         self.embed = nn.Linear(patch_len, d_model)
         self.position = nn.Parameter(torch.randn(1, n_patches, d_model) * 0.02)
@@ -87,6 +87,8 @@ class PatchTST(nn.Module):
             #without revin every week is scaled by the same mean and spread, those of the training data
             self.register_buffer("scale", torch.tensor([0.0, 1.0]))
         self.keep_attention, self.attention = False, None
+        if history_days not in lookbacks:
+            raise ValueError(f"history_days must be one of {lookbacks}, not {history_days!r}")
 
     def normalise(self, history):
         if self.use_revin:
@@ -127,9 +129,10 @@ def pinball_loss(predicted, actual, scale):
 
 
 defaults = {"patch_len": 24, "stride": 12, "d_model": 64, "heads": 4, "layers": 2, "dropout": 0.1, "hidden": 128,
-            "pooling": "attention", "lags": 0, "revin": 1, "weather": 1, "solar": 1, "christmas": 1, "learning_rate": 1e-3, "weight_decay": 1e-2, "batch_size": 128, "max_epochs": 40,
+            "pooling": "attention", "lags": 0, "revin": 1, "history_days": 7, "weather": 1, "solar": 1, "christmas": 1, "learning_rate": 1e-3, "weight_decay": 1e-2, "batch_size": 128, "max_epochs": 40,
             "patience": 6, "warmup": 0.05, "train_stride": 2, "seed": 42}
-architecture = ["patch_len", "stride", "d_model", "heads", "layers", "dropout", "hidden", "pooling", "lags", "revin"]
+architecture = ["patch_len", "stride", "d_model", "heads", "layers", "dropout", "hidden", "pooling", "lags", "revin",
+                "history_days"]
 
 
 class PatchTSTForecaster:
@@ -139,8 +142,12 @@ class PatchTSTForecaster:
             raise ValueError(f"unknown settings: {sorted(unknown)}")
         self.settings = {**defaults, **settings}
 
+    def history(self):
+        """How many past half hours each forecast reads."""
+        return self.settings["history_days"] * 48
+
     def tensors(self, df, starts):
-        history, future, actual = arrays(df, starts)
+        history, future, actual = arrays(df, starts, self.history())
         future = (future[..., self.columns()] - self.cov_mean) / self.cov_std
         return torch.from_numpy(history), torch.from_numpy(future), torch.from_numpy(actual)
 
@@ -155,6 +162,8 @@ class PatchTSTForecaster:
         """Train on the windows at `starts`. With `valid`, stop when the loss on those windows stops improving;
         with `epochs`, train for exactly that many (used to refit on all the data once the best length is known), 
         `callback(epoch, loss)` is called after each epoch's validation loss, which lets Optuna stop poor trials early."""
+        if len(starts) == 0:
+            raise ValueError("no training windows: the data before them is shorter than the longest history")
         torch.manual_seed(self.settings["seed"])
         cov = covariate_matrix(df)[starts[:, None] + np.arange(horizon)][..., self.columns()].reshape(-1, len(self.columns()))
         self.cov_mean, self.cov_std = cov.mean(axis=0), cov.std(axis=0) + 1e-6
@@ -223,7 +232,8 @@ class PatchTSTForecaster:
     @classmethod
     def load(cls, path):
         saved = torch.load(path)
-        model = cls(**{"pooling": "flatten", "lags": 0, "revin": 1, "weather": 1, "solar": 1, "christmas": 1, **saved["settings"]})
+        model = cls(**{"pooling": "flatten", "lags": 0, "revin": 1, "history_days": 7, "weather": 1, "solar": 1, "christmas": 1,
+                     **saved["settings"]})
         model.cov_mean = np.array(saved["cov_mean"], dtype=np.float32)
         model.cov_std = np.array(saved["cov_std"], dtype=np.float32)
         model.best_epochs = saved["best_epochs"]

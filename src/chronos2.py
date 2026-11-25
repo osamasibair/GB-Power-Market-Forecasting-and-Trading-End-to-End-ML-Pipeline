@@ -35,15 +35,13 @@ import pandas as pd
 
 from forecast_windows import (
     covariate_matrix,
-    covariates,
-    cycles,
     day_windows,
     gap_steps,
     horizon,
+    names,
 )
 
 model_name = "amazon/chronos-2"
-names = covariates + [f"{kind}_{name}" for name in cycles for kind in ("sin", "cos")]
 steps_ahead = gap_steps + horizon  # the 16 hour gap plus tomorrow
 quantile_levels = [0.1, 0.5, 0.9]
 versions = {
@@ -135,7 +133,11 @@ def export(path, demand, cov, grid, calib_positions, test_positions):
 
 
 def load_export(path):
+    """Read an export. The input names come from the file, so the fine-tuned model reads exactly the inputs the export
+    was made with, even if the code on the GPU machine is a different version."""
+    global names
     frame = pd.read_csv(path, index_col="timestamp", parse_dates=True)
+    names = [column for column in frame.columns if column not in ("demand", "role")]
     role = frame["role"].fillna("")
     return (frame["demand"].to_numpy(np.float32), frame[names].to_numpy(np.float32), frame.index,
             np.flatnonzero(role == "calibration"), np.flatnonzero(role == "test"))

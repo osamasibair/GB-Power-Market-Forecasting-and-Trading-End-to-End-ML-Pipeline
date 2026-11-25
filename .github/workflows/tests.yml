@@ -18,10 +18,10 @@ jobs:
         run: docker compose up -d --wait db
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Install PyTorch (CPU only) and Optuna, for the transformer tests
+      - name: Install PyTorch (CPU only), Optuna and XGBoost, for the research tests
         run: |
           pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install optuna==5.0.0
+          pip install optuna==5.0.0 xgboost==3.4.1
       - name: Lint
         run: ruff check .
       - name: Create CI fixtures

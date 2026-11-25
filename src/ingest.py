@@ -10,6 +10,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from gb_weather import regions as weather_points
+from gb_weather import variables as weather_variables
 from gb_weather import weather_model
 
 raw = Path("data/raw")
@@ -43,7 +44,7 @@ def fetch_weather(start, end, lat=51.5072, lon=-0.1276):
         "longitude": lon,
         "start_date": start,
         "end_date": end,
-        "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation",
+        "hourly": ",".join(weather_variables),
         "models": weather_model,
         "timezone": "UTC",
     }
@@ -67,7 +68,7 @@ def fetch_weather_forecast(past_days, forecast_days, lat=51.5072, lon=-0.1276):
     query = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation",
+        "hourly": ",".join(weather_variables),
         "models": weather_model,
         "timezone": "UTC",
         "past_days": past_days,

@@ -142,3 +142,15 @@ def test_fine_tuning_with_the_same_seed_repeats_and_another_seed_differs(tmp_pat
     first = run(1)
     assert np.allclose(first, run(1))
     assert not np.allclose(first, run(2))
+
+
+def test_the_gpu_machine_reads_the_input_names_from_the_export(tmp_path, monkeypatch):
+    import chronos2
+
+    df = make_features(days=20)
+    demand, cov, grid = regular_grid(df)
+    days = grid.get_indexer(df.index[day_windows(df.index)])
+    export(tmp_path / "input.csv.gz", demand, cov, grid, days[:5], days[5:])
+    monkeypatch.setattr(chronos2, "names", names[:3])  # as if the GPU machine had an older list of inputs
+    _, cov2, _, _, _ = load_export(tmp_path / "input.csv.gz")
+    assert chronos2.names == names and np.allclose(cov2, cov, atol=1e-5)

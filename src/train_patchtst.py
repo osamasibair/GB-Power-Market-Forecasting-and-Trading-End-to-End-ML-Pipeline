@@ -12,7 +12,13 @@ import pandas as pd
 
 from db import load_table, save_table
 from evaluate import metrics
-from forecast_windows import day_windows, horizon, windows
+from forecast_windows import (
+    day_windows,
+    first_training_day,
+    horizon,
+    longest_history,
+    windows,
+)
 from tracking import log_run
 
 models = Path("models")
@@ -83,14 +89,16 @@ def patchtst(df, calib_days, test_days, actual_calib, actual_test, calibration_s
     started = time.perf_counter()
     print("patchtst: training on data before the calibration year, stopping when the calibration loss stops improving")
     early = PatchTSTForecaster(**settings)
-    early.fit(df, windows(df.index, last=calibration_start, stride=early.settings["train_stride"]), valid=calib_days, verbose=True)
+    early.fit(df, windows(df.index, first=first_training_day, last=calibration_start, stride=early.settings["train_stride"],
+                          history=longest_history), valid=calib_days, verbose=True)
     calib = early.predict(df, calib_days).reshape(-1, 3)
     adjustment = conformal_adjustment(actual_calib, calib[:, 0], calib[:, 2])
     print(f"patchtst: best after {early.best_epochs} epochs, conformal adjustment {adjustment:.0f} MW")
 
     print(f"patchtst: refitting on all data before {split_date} for {early.best_epochs} epochs")
     final = PatchTSTForecaster(**settings)
-    final.fit(df, windows(df.index, last=split_date, stride=final.settings["train_stride"]), epochs=early.best_epochs, verbose=True)
+    final.fit(df, windows(df.index, first=first_training_day, last=split_date, stride=final.settings["train_stride"],
+                          history=longest_history), epochs=early.best_epochs, verbose=True)
     test = final.predict(df, test_days).reshape(-1, 3)
     print(f"patchtst: trained twice in {time.perf_counter() - started:.0f}s")
     forecasts = {"patchtst": test[:, 1], "patchtst_low": test[:, 0] - adjustment, "patchtst_high": test[:, 2] + adjustment}  

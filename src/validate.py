@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from gb_weather import regions as weather_points
+from gb_weather import variables as weather_variables
 
 raw = Path("data/raw")
 
@@ -48,7 +49,10 @@ def check_weather(df):
         irregular = (gaps != pd.Timedelta(hours=1)).sum()
         if irregular > 0:
             problems.append(f"{region}: {irregular} gaps or overlaps in hourly sequence")
-    nulls = df[["temperature_2m", "wind_speed_10m", "shortwave_radiation"]].isna().sum()
+    absent = [column for column in weather_variables if column not in df]
+    if absent:
+        problems.append(f"no {', '.join(absent)} column (download the weather again)")
+    nulls = df[[column for column in weather_variables if column in df]].isna().sum()
     for column, count in nulls[nulls > 0].items():
         regions = ", ".join(sorted(df.loc[df[column].isna(), "region"].unique()))
         problems.append(f"{count} missing {column} values ({regions})")

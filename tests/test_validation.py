@@ -1,6 +1,8 @@
 import itertools
 
+import numpy as np
 import pandas as pd
+import pytest
 from test_patchtst import make_features
 
 from quantiles import calibration_start
@@ -27,8 +29,43 @@ def test_a_validation_year_is_only_forecast_from_data_before_it():
 def test_patchtst_is_scored_on_each_validation_year_by_a_model_trained_before_it(monkeypatch):
     import validation
 
-    df = make_features("2024-01-01", days=90)
+    df = make_features("2023-11-01", days=140)
     monkeypatch.setattr(validation, "folds", [("2024-02-15", "2024-03-01"), ("2024-03-01", "2024-03-15")])
+    import forecast_windows
+    monkeypatch.setattr(forecast_windows, "first_training_day", "2023-12-14")
     years = validation.patchtst_years(df, {"max_epochs": 2, "d_model": 16, "hidden": 32, "train_stride": 16})
     assert len(years) == 2
     assert all(y["loss"] > 0 and 0 < y["mape"] < 50 and 1 <= y["best_epoch"] <= 2 for y in years)
+
+
+def test_every_history_length_is_trained_on_the_same_days(monkeypatch):
+    import patchtst
+    import validation
+
+    df = make_features("2023-11-01", days=140)
+    monkeypatch.setattr(validation, "folds", [("2024-02-15", "2024-03-01")])
+    import forecast_windows
+    monkeypatch.setattr(forecast_windows, "first_training_day", "2023-12-14")
+    trained = {}
+
+    def fit(self, df, starts, **kwargs):
+        trained[self.settings["history_days"]] = starts
+        raise StopIteration
+
+    monkeypatch.setattr(patchtst.PatchTSTForecaster, "fit", fit)
+    for days in (7, 42):
+        try:
+            validation.patchtst_years(df, {"history_days": days, "train_stride": 16})
+        except StopIteration:
+            pass
+    assert (trained[7] == trained[42]).all()
+    assert trained[7].min() >= 42 * 48
+
+
+def test_the_pinball_loss_is_in_mw_and_scores_each_quantile_on_its_own_side():
+    from validation import pinball_mw
+
+    actual = np.array([[100.0]])
+    predicted = np.array([[[90.0, 100.0, 110.0]]])  # 10% forecast 10 MW low, median exact, 90% forecast 10 MW high
+    assert pinball_mw(actual, predicted, (0.1, 0.5, 0.9)) == pytest.approx((0.1 * 10 + 0 + 0.1 * 10) / 3)
+    assert pinball_mw(actual * 2, predicted * 2, (0.1, 0.5, 0.9)) == pytest.approx(2 * (0.1 * 10 + 0.1 * 10) / 3)
