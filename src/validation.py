@@ -33,30 +33,56 @@ def pinball_mw(actual, predicted, quantiles):
     return float(np.maximum(q * error, (q - 1) * error).mean())
 
 
-def patchtst_years(df, settings, report=None, target="demand"):
-    """Train PatchTST with settings once for each validation year, on the data before it, early stopping on the year
-    itself as train_patchtst.py does with the calibration year. For each year: the pinball loss in MW on that year (the
-    score every PatchTST choice is made by), the epoch early stopping chose and its training loss (scaled by each
-    window's history, so not comparable between history lengths), the median forecast's MAPE and the model's size.
-    report(year, epoch, loss), if given, is called after every epoch, which lets optuna stop poor trials early."""
+def edge_settings(params, distributions, natural=None, margin=0.1):
+    """The rule every model's search follows, applied the same way to each: the best settings `params` that lie in the
+    outer `margin` (10%) of their search range, measured on the scale searched (log or linear), or at the first or last
+    of a list of choices. Such a range is widened and that model's search rerun. `natural` gives the limits a setting
+    can't go past, as {(setting, "low" or "high"): limit} (no dropout, a full sample of rows): an end already at its
+    limit isn't flagged. `distributions` are optuna's, from a finished trial. Returns (setting, value, "low" or "high")
+    for each setting at an edge."""
+    import math
+
+    natural = natural or {}
+    out = []
+    for name, d in distributions.items():
+        value = params[name]
+        if hasattr(d, "choices"):
+            choices = list(d.choices)
+            side = "low" if value == choices[0] else "high" if value == choices[-1] else None
+            end = choices[0] if side == "low" else choices[-1]
+        else:
+            if getattr(d, "log", False):
+                position = math.log(value / d.low) / math.log(d.high / d.low)
+            else:
+                position = (value - d.low) / (d.high - d.low)
+            side = "low" if position < margin else "high" if position > 1 - margin else None
+            end = d.low if side == "low" else d.high
+        if side and natural.get((name, side)) != end:
+            out.append((name, value, side))
+    return out
+
+
+def patchtst_years(df, settings, target="demand"):
+    """Train PatchTST with settings once for each validation year, on the data before it, for exactly its number of
+    epochs (a setting, chosen by tuning like the boosting models' number of trees): nothing is chosen by looking at the
+    year being scored. For each year: the pinball loss in MW on that year (the score every PatchTST choice is made by),
+    the median forecast's MAPE, the number of epochs and the model's size."""
     from evaluate import metrics
     from forecast_windows import first_training_day, longest_history, windows
     from patchtst import PatchTSTForecaster, quantiles
 
     results = []
-    for i, (start, end) in enumerate(folds):
+    for start, end in folds:
         days = day_windows(df.index, start, end)
         model = PatchTSTForecaster(**settings)
-        callback = None if report is None else (lambda epoch, loss, year=i: report(year, epoch, loss))
         train = windows(df.index, first=first_training_day, last=start, stride=model.settings["train_stride"],
                         history=longest_history)
-        model.fit(df, train, valid=days, callback=callback)
+        model.fit(df, train, epochs=model.settings["epochs"])
         predicted = model.predict(df, days)
         actual = df[target].to_numpy()[days[:, None] + np.arange(horizon)]
-        results.append({"loss": pinball_mw(actual, predicted, quantiles), "best_epoch": model.best_epochs,
-                        "training_loss": float(min(model.valid_losses)),
+        results.append({"loss": pinball_mw(actual, predicted, quantiles), "epochs": model.settings["epochs"],
                         "mape": float(metrics(actual.ravel(), predicted[..., 1].ravel())["mape"]),
                         "parameters": sum(p.numel() for p in model.net.parameters())})
         print(f"  validation year {start} to {end}: loss {results[-1]['loss']:.1f} MW, MAPE {results[-1]['mape']:.2f}%, "
-              f"best epoch {model.best_epochs}")
+              f"{model.settings['epochs']} epochs")
     return results

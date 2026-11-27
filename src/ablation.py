@@ -1,12 +1,20 @@
-"""Choose PatchTST's design on the two validation years (validation.py), one setting at a time: train it once for each
-value of one setting, everything else unchanged, with several seeds, and score each run by its best pinball loss on
-each validation year (each year forecast by a model trained only on the data before it). The value with the lowest
-loss averaged over both years and the seeds wins. Results go to the transformer_ablation table (one row per setting and
-value) and to the MLflow experiment demand-patchtst-ablation. The test year is never used here.
-    python src/ablation.py pooling flatten mean attention --seeds 42 1 2 3 4
-After the design settings have been compared (pooling, revin, lags, history_days), choose them all and save them to
-models/patchtst_design.json for src/tune_patchtst.py:
-    python src/ablation.py --decide"""
+"""Compare PatchTST's settings on the two validation years (validation.py), one setting at a time: train it once for
+each value of one setting, everything else unchanged, with several seeds, and score each run by its pinball loss in MW
+on each validation year (each year forecast by a model trained only on the data before it, for its set number of
+epochs), averaged over both years and the seeds. Results go to the transformer_ablation table (one row per setting,
+value and starting point) and to the MLflow experiment demand-patchtst-ablation. The test year is never used here.
+
+Only the lookback (history_days) is chosen here, as for every model: first with the default settings (step 1), then
+rechecked with the tuned ones (step 3). Every other setting, pooling, RevIN and lags included, is chosen in the 40
+tuning trials (src/tune_patchtst.py), the same budget as every model. Comparisons of other settings are only for the
+write-up: they show what each choice does and choose nothing.
+1. Lookback with the default settings, saved to models/patchtst_lookback.json for src/tune_patchtst.py:
+    python src/ablation.py history_days 7 14 21 28 42
+    python src/ablation.py --decide
+3. Recheck with the tuned settings: if a different lookback wins, it's saved to models/patchtst_lookback.json and
+   models/patchtst_tuned.json; the settings aren't tuned again, so it's one pass, as for every model.
+    python src/ablation.py history_days 7 14 21 28 42 --tuned
+    python src/ablation.py --decide --tuned"""
 import argparse
 import json
 from pathlib import Path
@@ -15,14 +23,10 @@ import pandas as pd
 
 from db import load_table, save_table
 from tracking import log_run
-from train_patchtst import base_settings
+from train_patchtst import base_settings, seeds, tuned_path
 from validation import patchtst_years
 
-# the weather and calendar inputs aren't chosen here: every model gets all of them, with no selection
-# (forecast_windows.known_inputs), so differences between models come from the models
-design_settings = ["pooling", "revin", "lags", "history_days"]
-design_path = Path("models") / "patchtst_design.json"
-seeds = [42, 1, 2, 3, 4]
+lookback_path = Path("models") / "patchtst_lookback.json"
 min_seeds = len(seeds)
 
 
@@ -52,10 +56,11 @@ def run_settings(base, setting, value, seed):
 
 
 def run_row(years):
-    """One run's results from patchtst_years: each year's loss, MAPE and best epoch, and their averages."""
+    """One run's results from patchtst_years: each year's loss and MAPE, their averages, and the number of epochs."""
     row = {"parameters": years[0]["parameters"]}
     for i, year in enumerate(years, start=1):
-        row.update({f"loss_year{i}": year["loss"], f"mape_year{i}": year["mape"], f"best_epoch_year{i}": year["best_epoch"]})
+        row.update({f"loss_year{i}": year["loss"], f"mape_year{i}": year["mape"]})
+    row["epochs"] = years[0]["epochs"]
     row["validation_loss"] = sum(y["loss"] for y in years) / len(years)
     row["mape"] = sum(y["mape"] for y in years) / len(years)
     return row
@@ -73,30 +78,27 @@ def average(runs):
 
 
 def merge(old, new):
-    """Replace the rows for the setting just tested and keep the rows for other settings."""
+    """Replace the rows for the setting just tested from the same starting point (defaults or tuned settings) and keep
+    every other row."""
     if old is None:
         return new
-    old = old[old["setting"] != new["setting"].iloc[0]]
-    return pd.concat([old, new], ignore_index=True)
+    same = (old["setting"] == new["setting"].iloc[0]) & (old["tuned"].astype(bool) == bool(new["tuned"].iloc[0]))
+    return pd.concat([old[~same], new], ignore_index=True)
 
 
-def decide(table, settings=design_settings, min_seeds=min_seeds):
-    """For each design setting, the value with the lowest validation loss, from runs that started from the defaults
-    (not the tuned settings) with at least min_seeds seeds. Also returns, for each setting, the winner's margin over the
-    runner-up and the larger of their seed spreads, so a choice closer than the noise is visible."""
-    chosen, report = {}, []
-    for setting in settings:
-        rows = table[(table["setting"] == setting) & (~table["tuned"].astype(bool)) & (table["seeds"] >= min_seeds)]
-        if "validation_loss" not in rows or len(rows) < 2:
-            raise SystemExit(f"no complete comparison for {setting}: run python src/ablation.py {setting} ... "
-                             f"--seeds {' '.join(map(str, seeds))}")
-        rows = rows.sort_values("validation_loss")
-        best, second = rows.iloc[0], rows.iloc[1]
-        chosen[setting] = parse(str(best["value"]))
-        noise = max(best["validation_loss_std"], second["validation_loss_std"])
-        report.append({"setting": setting, "chosen": best["value"], "runner_up": second["value"],
-                       "margin": second["validation_loss"] - best["validation_loss"], "seed_spread": noise})
-    return chosen, pd.DataFrame(report)
+def decide(table, setting="history_days", tuned=False, min_seeds=min_seeds):
+    """The value of `setting` with the lowest validation loss, from runs that started from the defaults (or, with tuned,
+    from the tuned settings) with at least min_seeds seeds. Also returns the winner's margin over the runner-up and the
+    larger of their seed spreads, so a choice closer than the noise is visible."""
+    rows = table[(table["setting"] == setting) & (table["tuned"].astype(bool) == tuned) & (table["seeds"] >= min_seeds)]
+    if "validation_loss" not in rows or len(rows) < 2:
+        raise SystemExit(f"no complete comparison for {setting}: run python src/ablation.py {setting} ... "
+                         f"{'--tuned ' if tuned else ''}--seeds {' '.join(map(str, seeds))}")
+    rows = rows.sort_values("validation_loss")
+    best, second = rows.iloc[0], rows.iloc[1]
+    return parse(str(best["value"])), {"runner_up": second["value"],
+                                       "margin": second["validation_loss"] - best["validation_loss"],
+                                       "seed_spread": max(best["validation_loss_std"], second["validation_loss_std"])}
 
 
 if __name__ == "__main__":
@@ -105,23 +107,32 @@ if __name__ == "__main__":
     parser.add_argument("values", nargs="*", help="the values to try")
     parser.add_argument("--seeds", nargs="+", type=int, default=seeds,
                         help="train once per seed and average (default 42 1 2 3 4)")
-    parser.add_argument("--tuned", action="store_true", help="start from the settings in models/patchtst_tuned.json")
-    parser.add_argument("--from-design", action="store_true",
-                        help=f"start from the design in {design_path} instead of the defaults, to recheck one choice "
-                             "given the others")
+    parser.add_argument("--tuned", action="store_true", help=f"start from the settings in {tuned_path}")
     parser.add_argument("--decide", action="store_true",
-                        help=f"choose {', '.join(design_settings)} from the saved comparisons and save them to {design_path}")
+                        help=f"choose the lookback from the saved comparison and save it to {lookback_path} (with "
+                             f"--tuned: the recheck, which also updates {tuned_path})")
     args = parser.parse_args()
 
     if args.decide:
-        chosen, report = decide(load_table("transformer_ablation"))
-        print(report.round(4).to_string(index=False))
-        close = report[report["margin"] < report["seed_spread"]]
-        if len(close):
-            print(f"\ncloser than the spread between seeds (still decided by the average): {', '.join(close['setting'])}")
-        design_path.parent.mkdir(exist_ok=True)
-        design_path.write_text(json.dumps(chosen, indent=2) + "\n")
-        print(f"\nsaved {chosen} to {design_path}")
+        days, report = decide(load_table("transformer_ablation"), tuned=args.tuned)
+        print(f"lookback {days} days, runner-up {report['runner_up']} days, margin {report['margin']:.1f} MW, "
+              f"spread between seeds {report['seed_spread']:.1f} MW")
+        if report["margin"] < report["seed_spread"]:
+            print("closer than the spread between seeds (still decided by the average)")
+        lookback_path.parent.mkdir(exist_ok=True)
+        if not args.tuned:
+            lookback_path.write_text(json.dumps({"lookback_days": days}, indent=2) + "\n")
+            print(f"saved {days} days to {lookback_path}")
+            raise SystemExit
+        tuned = json.loads(tuned_path.read_text())
+        if tuned["history_days"] == days:
+            print(f"the tuned model keeps {days} days")
+            raise SystemExit
+        lookback_path.write_text(json.dumps({"lookback_days": days, "before_recheck": tuned["history_days"]}, indent=2)
+                                 + "\n")
+        print(f"the tuned model now reads {days} days instead of {tuned['history_days']}, saved to {lookback_path} "
+              f"and {tuned_path}")
+        tuned_path.write_text(json.dumps({**tuned, "history_days": days}, indent=2) + "\n")
         raise SystemExit
 
     from patchtst import defaults
@@ -131,11 +142,6 @@ if __name__ == "__main__":
 
     df = load_table("features")
     base = base_settings(args.tuned)
-    if args.from_design:
-        if not design_path.exists():
-            raise SystemExit(f"{design_path} not found, run python src/ablation.py --decide first")
-        base = {**base, **json.loads(design_path.read_text())}
-        print(f"starting from the design in {design_path}: { {k: base[k] for k in design_settings if k in base} }")
     results = []
     for value in map(parse, args.values):
         runs = []
@@ -145,13 +151,12 @@ if __name__ == "__main__":
             run = run_row(patchtst_years(df, settings))
             runs.append(run)
             log_run(experiment="demand-patchtst-ablation", params={**settings, "setting": args.setting}, metrics=run, files=[])
-        results.append({"setting": args.setting, "value": str(value), "tuned": args.tuned,
-                        "from_design": args.from_design, **average(runs)})
+        results.append({"setting": args.setting, "value": str(value), "tuned": args.tuned, **average(runs)})
 
     table = pd.DataFrame(results)
     print(f"\n{args.setting:>12} {'parameters':>11} {'loss year 1':>12} {'loss year 2':>12} {'average (decides)':>22} "
-          f"{'MAPE':>15}   ({len(args.seeds)} seed{'s' if len(args.seeds) > 1 else ''}{', tuned' if args.tuned else ''}"
-          f"{', from the design' if args.from_design else ''})")
+          f"{'MAPE':>15}   ({len(args.seeds)} seed{'s' if len(args.seeds) > 1 else ''}"
+          f"{', from the tuned settings' if args.tuned else ', from the defaults'})")
     for _, r in table.iterrows():
         print(f"{r['value']:>12} {r['parameters']:>11,.0f} {r['loss_year1']:>9.1f} MW {r['loss_year2']:>9.1f} MW "
               f"{r['validation_loss']:>10.1f} ± {r['validation_loss_std']:.1f} MW {r['mape']:>7.2f}% ± {r['mape_std']:.2f}")

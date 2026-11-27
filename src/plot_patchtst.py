@@ -1,6 +1,6 @@
 """Draw the PatchTST figures for the README into docs/:
 - a week of test period forecasts from PatchTST and LightGBM against actual demand, with PatchTST's 80% range
-- the learning curve the early stopping chose from
+- the learning curve: the loss on the calibration year after each epoch, recorded but not used to choose anything
 - which half hours of the past week each of tomorrow  s forecasts depends on most (the gradient of the forecast with respect to each past value, averaged over every test day)"""
 import argparse
 import multiprocessing
@@ -86,7 +86,7 @@ def forecast_week(df, model, adjustment, starts, lightgbm, start):
 
 def learning_curve(losses):
     epochs = np.arange(1, len(losses) + 1)
-    best = int(np.argmin(losses))
+    best = len(losses) - 1  # the number of epochs is a tuned setting, so the last epoch is the one kept
     fig, ax = plt.subplots(figsize=(6, 3.2), dpi=150)
     ax.plot(epochs, losses, color=blue, linewidth=2, marker="o", markersize=4)
     ax.plot(epochs[best], losses[best], marker="o", markersize=9, color=blue, markeredgecolor="#fcfcfb", markeredgewidth=2)
@@ -96,7 +96,7 @@ def learning_curve(losses):
     style(ax)
     ax.set_xlabel("Epoch", color=muted, fontsize=9)
     ax.set_ylabel("Calibration-year loss", color=muted, fontsize=9)
-    ax.set_title("Early stopping on the calibration year", loc="left", fontsize=11, color=ink)
+    ax.set_title("Calibration-year loss by epoch (recorded, not used to choose)", loc="left", fontsize=11, color=ink)
     fig.tight_layout()
     fig.savefig(docs / "patchtst_learning_curve.png", bbox_inches="tight")
     plt.close(fig)

@@ -13,6 +13,7 @@ from tune_boosting import (
     add_lags,
     columns_for,
     compare,
+    confirm,
     defaults,
     lag_columns,
     make_model,
@@ -81,8 +82,8 @@ def test_both_models_get_every_weather_and_calendar_input_plus_their_lags():
 
 
 def test_each_model_and_lookback_has_its_own_study():
-    assert storage_for("lightgbm", 7).endswith("optuna_lightgbm_7d.db")
-    assert storage_for("xgboost", 28).endswith("optuna_xgboost_28d.db")
+    assert storage_for("lightgbm", 7).endswith("optuna_lightgbm_7d_wide2.db")
+    assert storage_for("xgboost", 28).endswith("optuna_xgboost_28d_wide2.db")
 
 
 @pytest.mark.parametrize("name", ["lightgbm", "xgboost"])
@@ -114,3 +115,44 @@ def test_tuned_forecasts_average_the_seeds_and_the_range_contains_the_forecast(n
     assert inside.mean() >= 0.8
     assert len(out["seed_mapes"]) == 2
     assert np.mean(np.abs(out["forecasts"][key] - test["demand"]) / test["demand"]) < 0.06
+
+
+@pytest.mark.parametrize("name", ["lightgbm", "xgboost"])
+def test_the_ranges_reach_past_where_the_first_search_found_its_best_settings(name):
+    trial = optuna.create_study().ask()
+    suggest(name, trial)
+    ranges = {key: (d.low, d.high) for key, d in trial.distributions.items()}
+    assert ranges["n_estimators"] == (100, 5000) and ranges["colsample_bytree"] == (0.2, 1.0)
+    assert ranges["learning_rate"] == ((0.005, 0.5) if name == "lightgbm" else (0.005, 1.0))
+    assert ranges["reg_lambda"] == (0.0, 10.0)
+    if name == "lightgbm":
+        assert ranges["num_leaves"] == (2, 255) and ranges["min_child_samples"] == (5, 1000)
+    else:
+        assert ranges["max_depth"] == (1, 12) and ranges["min_child_weight"] == (0.01, 100.0)
+    assert all(low <= defaults[name][key] <= high for key, (low, high) in ranges.items())
+
+
+def test_the_best_trials_are_chosen_by_their_loss_averaged_over_every_seed():
+    from types import SimpleNamespace
+
+    base = {**defaults["lightgbm"], "subsample": 0.8}
+    lucky = SimpleNamespace(number=1, value=280.0, params={**base, "num_leaves": 5})
+    steady = SimpleNamespace(number=2, value=281.0, params={**base, "num_leaves": 7})
+    later = {5: 290.0, 7: 282.0}
+    seen = []
+
+    def scores(name, settings, columns, years, seed):
+        seen.append(seed)
+        return [{"loss": later[settings["num_leaves"]]}] * 2
+
+    results = confirm("lightgbm", [lucky, steady], [], [], scores)
+    assert [r["trial"].number for r in results] == [2, 1] and seen == [1, 2, 3, 4] * 2
+    assert results[0]["mean"] == (281.0 + 4 * 282.0) / 5
+
+
+def test_settings_without_randomness_are_not_trained_again_for_other_seeds():
+    from types import SimpleNamespace
+
+    fixed = SimpleNamespace(number=0, value=300.0, params=defaults["xgboost"])
+    results = confirm("xgboost", [fixed], [], [], lambda *a: pytest.fail("trained again"))
+    assert results[0]["losses"] == [300.0] * 5 and results[0]["std"] == 0

@@ -1,5 +1,6 @@
 """PatchTST, a transformer that forecasts the 48 half hours of the next day from the past week of demand, with a 10-90% range."""
 import math
+import os
 import time
 
 import numpy as np
@@ -18,6 +19,11 @@ from forecast_windows import (
 quantiles = (0.1, 0.5, 0.9)
 poolings = ("flatten", "mean", "attention")
 
+def device():
+    """Where training runs: the PATCHTST_DEVICE environment variable (cpu, mps for a Mac's GPU, cuda for an Nvidia GPU),
+    cpu if it isn't set. Only the speed changes: the model is the same, and it's moved back to the CPU after training,
+    so forecasts, saved models and the live job don't depend on where it was trained."""
+    return torch.device(os.environ.get("PATCHTST_DEVICE", "cpu"))
 
 lag_steps = (96, 336)  # the same half hour 2 days and 7 days earlier, both inside the history window
 
@@ -124,12 +130,12 @@ class PatchTST(nn.Module):
 
 def pinball_loss(predicted, actual, scale):
     error = (actual[..., None] - predicted) / scale[..., None]
-    q = torch.tensor(quantiles, dtype=predicted.dtype)
+    q = torch.tensor(quantiles, dtype=predicted.dtype, device=predicted.device)
     return torch.maximum(q * error, (q - 1) * error).mean()
 
 
 defaults = {"patch_len": 24, "stride": 12, "d_model": 64, "heads": 4, "layers": 2, "dropout": 0.1, "hidden": 128,
-            "pooling": "attention", "lags": 0, "revin": 1, "history_days": 7, "weather": 1, "solar": 1, "christmas": 1, "learning_rate": 1e-3, "weight_decay": 1e-2, "batch_size": 128, "max_epochs": 40,
+            "pooling": "attention", "lags": 0, "revin": 1, "history_days": 7, "weather": 1, "solar": 1, "christmas": 1, "learning_rate": 1e-3, "weight_decay": 1e-2, "batch_size": 128, "epochs": 10, "max_epochs": 40,
             "patience": 6, "warmup": 0.05, "train_stride": 2, "seed": 42}
 architecture = ["patch_len", "stride", "d_model", "heads", "layers", "dropout", "hidden", "pooling", "lags", "revin",
                 "history_days"]
@@ -158,10 +164,11 @@ class PatchTSTForecaster:
         scale = history.std(dim=1, unbiased=False) + 1e-5
         return pinball_loss(self.net(history, future), actual, scale[:, None])
 
-    def fit(self, df, starts, valid=None, epochs=None, verbose=False, callback=None):
-        """Train on the windows at `starts`. With `valid`, stop when the loss on those windows stops improving;
-        with `epochs`, train for exactly that many (used to refit on all the data once the best length is known), 
-        `callback(epoch, loss)` is called after each epoch's validation loss, which lets Optuna stop poor trials early."""
+    def fit(self, df, starts, valid=None, epochs=None, verbose=False, callback=None, keep_best=True):
+        """Train on the windows at `starts`. With `valid` (and keep_best), stop when the loss on those windows stops
+        improving and keep the best epoch; with `epochs`, train for exactly that many. With keep_best=False the loss on
+        `valid` is only recorded, for the learning curve: training runs for exactly `epochs` and keeps the last epoch,
+        so nothing about `valid` is chosen from it. `callback(epoch, loss)` is called after each epoch's loss on `valid`."""
         if len(starts) == 0:
             raise ValueError("no training windows: the data before them is shorter than the longest history")
         torch.manual_seed(self.settings["seed"])
@@ -174,6 +181,11 @@ class PatchTSTForecaster:
         self.net = PatchTST(future.shape[-1], **{name: self.settings[name] for name in architecture})
         if not self.settings["revin"]:
             self.net.scale.copy_(torch.stack([history.mean(), history.std()]))
+        where = device()
+        self.net.to(where)
+        history, future, actual = history.to(where), future.to(where), actual.to(where)
+        if valid is not None:
+            valid_tensors = tuple(t.to(where) for t in valid_tensors)
         s = self.settings
         epochs = epochs or s["max_epochs"]
         steps = epochs * math.ceil(len(history) / s["batch_size"])
@@ -188,6 +200,7 @@ class PatchTSTForecaster:
             self.net.train()
             started = time.perf_counter()
             for batch in torch.randperm(len(history), generator=generator).split(s["batch_size"]):
+                batch = batch.to(where)
                 optimiser.zero_grad()
                 loss = self.loss(history[batch], future[batch], actual[batch])
                 loss.backward()
@@ -211,12 +224,12 @@ class PatchTSTForecaster:
                 best_state = {name: value.clone() for name, value in self.net.state_dict().items()}
             else:
                 waited += 1
-                if waited >= s["patience"]:
+                if keep_best and waited >= s["patience"]:
                     break
-        if best_state is not None:
+        if keep_best and best_state is not None:
             self.net.load_state_dict(best_state)
-        self.best_epochs = int(np.argmin(self.valid_losses)) + 1 if self.valid_losses else epochs
-        self.net.eval()
+        self.best_epochs = int(np.argmin(self.valid_losses)) + 1 if self.valid_losses and keep_best else epochs
+        self.net.to("cpu").eval()
         return self
 
     def predict(self, df, starts):

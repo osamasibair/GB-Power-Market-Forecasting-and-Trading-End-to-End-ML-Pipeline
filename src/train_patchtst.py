@@ -25,6 +25,7 @@ models = Path("models")
 chronos_model = "amazon/chronos-bolt-small"
 
 tuned_path = models / "patchtst_tuned.json"
+seeds = [42, 1, 2, 3, 4]
 
 
 def base_settings(tuned):
@@ -83,28 +84,48 @@ def lightgbm_part():
     }
 
 
-def patchtst(df, calib_days, test_days, actual_calib, actual_test, calibration_start, split_date, settings):
+def patchtst(df, calib_days, test_days, actual_calib, actual_test, calibration_start, split_date, settings,
+             seeds=(42,)):
+    """PatchTST's forecasts and 80% range on the calibration and test years, made like every other model's: trained from
+    the first training day to the calibration year to forecast it and calibrate the range, then to the test year to
+    forecast that, each for exactly its number of epochs. With several seeds, each seed's 10/50/90% forecasts are
+    averaged, as for every tuned model. Returns the scores, the first seed's final model and calibration-year learning
+    curve (for the live forecasts and the figures), the range adjustment, the forecasts and each seed's test MAPE."""
     from patchtst import PatchTSTForecaster
 
     started = time.perf_counter()
-    print("patchtst: training on data before the calibration year, stopping when the calibration loss stops improving")
-    early = PatchTSTForecaster(**settings)
-    early.fit(df, windows(df.index, first=first_training_day, last=calibration_start, stride=early.settings["train_stride"],
-                          history=longest_history), valid=calib_days, verbose=True)
-    calib = early.predict(df, calib_days).reshape(-1, 3)
-    adjustment = conformal_adjustment(actual_calib, calib[:, 0], calib[:, 2])
-    print(f"patchtst: best after {early.best_epochs} epochs, conformal adjustment {adjustment:.0f} MW")
+    epochs = PatchTSTForecaster(**settings).settings["epochs"]
+    early_runs, final_runs, models_kept, losses_kept = [], [], [], []
+    for seed in seeds:
+        early = PatchTSTForecaster(**{**settings, "seed": seed})
+        print(f"patchtst, seed {seed}: training on data before the calibration year for {epochs} epochs (the calibration "
+              "loss is only recorded, for the learning curve, not used to choose anything)")
+        early.fit(df, windows(df.index, first=first_training_day, last=calibration_start,
+                              stride=early.settings["train_stride"], history=longest_history),
+                  valid=calib_days, epochs=epochs, verbose=True, keep_best=False)
+        early_runs.append(early.predict(df, calib_days).reshape(-1, 3))
+        losses_kept.append(early.valid_losses)
 
-    print(f"patchtst: refitting on all data before {split_date} for {early.best_epochs} epochs")
-    final = PatchTSTForecaster(**settings)
-    final.fit(df, windows(df.index, first=first_training_day, last=split_date, stride=final.settings["train_stride"],
-                          history=longest_history), epochs=early.best_epochs, verbose=True)
-    test = final.predict(df, test_days).reshape(-1, 3)
-    print(f"patchtst: trained twice in {time.perf_counter() - started:.0f}s")
-    forecasts = {"patchtst": test[:, 1], "patchtst_low": test[:, 0] - adjustment, "patchtst_high": test[:, 2] + adjustment}  
-    result = summary(actual_test, forecasts["patchtst"], forecasts["patchtst_low"], forecasts["patchtst_high"])  
-    calibration = {"patchtst": calib[:, 1], "patchtst_low": calib[:, 0] - adjustment, "patchtst_high": calib[:, 2] + adjustment}
-    return result, final, adjustment, early.valid_losses, forecasts, calibration
+        print(f"patchtst, seed {seed}: training on all data before {split_date} for {epochs} epochs")
+        final = PatchTSTForecaster(**{**settings, "seed": seed})
+        final.fit(df, windows(df.index, first=first_training_day, last=split_date, stride=final.settings["train_stride"],
+                              history=longest_history), epochs=epochs, verbose=True)
+        final_runs.append(final.predict(df, test_days).reshape(-1, 3))
+        models_kept.append(final)
+    calib, test = np.mean(early_runs, axis=0), np.mean(final_runs, axis=0)
+    adjustment = conformal_adjustment(actual_calib, calib[:, 0], calib[:, 2])
+    print(f"patchtst: {len(seeds)} seed{'s' if len(seeds) > 1 else ''} trained in {time.perf_counter() - started:.0f}s, "
+          f"conformal adjustment {adjustment:.0f} MW")
+
+    def interval(forecast):
+        # the same range as every model's: widened (or narrowed) by the adjustment, never past the median
+        return {"patchtst": forecast[:, 1], "patchtst_low": np.minimum(forecast[:, 0] - adjustment, forecast[:, 1]),
+                "patchtst_high": np.maximum(forecast[:, 2] + adjustment, forecast[:, 1])}
+
+    forecasts, calibration = interval(test), interval(calib)
+    result = summary(actual_test, forecasts["patchtst"], forecasts["patchtst_low"], forecasts["patchtst_high"])
+    seed_mapes = [float(metrics(actual_test, run[:, 1])["mape"]) for run in final_runs]
+    return result, models_kept[0], adjustment, losses_kept[0], forecasts, calibration, seed_mapes
 
 
 
@@ -168,8 +189,13 @@ if __name__ == "__main__":
     actual_test = df[target].to_numpy()[rows(test_days)]
     print(f"calibration: {len(calib_days)} days from {calibration_start}, test: {len(test_days)} days from {split_date}")
 
-    results["patchtst"], model, adjustment, early_losses, patchtst_forecasts, patchtst_calibration = patchtst(
-        df, calib_days, test_days, actual_calib, actual_test, calibration_start, split_date, base_settings(args.tuned))
+    # the tuned model is a final model, so it's trained with five seeds and averaged, as every model's final model is
+    results["patchtst"], model, adjustment, early_losses, patchtst_forecasts, patchtst_calibration, seed_mapes = patchtst(
+        df, calib_days, test_days, actual_calib, actual_test, calibration_start, split_date, base_settings(args.tuned),
+        seeds=seeds if args.tuned else (42,))
+    if len(seed_mapes) > 1:
+        print(f"patchtst ({len(seed_mapes)} seeds averaged): test MAPE {results['patchtst']['mape']:.2f}%; single seeds "
+              f"{np.mean(seed_mapes):.2f}% ± {np.std(seed_mapes, ddof=1):.2f}")
     forecasts.update(patchtst_forecasts)
     if not args.skip_chronos:
         chronos_result = chronos(df, calib_days, test_days, actual_calib, actual_test)

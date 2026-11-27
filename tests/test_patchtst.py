@@ -325,3 +325,35 @@ def test_models_saved_before_history_days_existed_load_with_a_week(tmp_path):
     model.save(tmp_path / "old.pt")
     loaded, _ = PatchTSTForecaster.load(tmp_path / "old.pt")
     assert loaded.history() == history_steps
+
+
+def test_without_keep_best_training_runs_every_epoch_and_keeps_the_last():
+    df = make_features(days=60)
+    valid = day_windows(df.index, first="2024-02-20")
+    model = PatchTSTForecaster(epochs=3, patience=1, d_model=16, hidden=32)
+    model.fit(df, windows(df.index, last="2024-02-20", stride=8), valid=valid, epochs=3, keep_best=False)
+    assert len(model.valid_losses) == 3 and model.best_epochs == 3
+
+
+def test_the_final_model_averages_its_seeds_and_its_range_never_crosses_the_median(monkeypatch):
+    import train_patchtst
+
+    df = make_features("2023-11-01", days=140)
+    monkeypatch.setattr(train_patchtst, "first_training_day", "2024-01-10")
+    calib, test = day_windows(df.index, "2024-02-20", "2024-03-05"), day_windows(df.index, "2024-03-05", "2024-03-15")
+
+    def actual(days):
+        return df["demand"].to_numpy()[days[:, None] + np.arange(48)].ravel()
+
+    settings = {"epochs": 2, "d_model": 16, "hidden": 32, "train_stride": 16}
+    _, model, _, losses, forecasts, _, seed_mapes = train_patchtst.patchtst(
+        df, calib, test, actual(calib), actual(test), "2024-02-20", "2024-03-05", settings, seeds=(42, 1))
+    assert len(seed_mapes) == 2 and model.settings["seed"] == 42 and len(losses) == 2
+    assert (forecasts["patchtst_low"] <= forecasts["patchtst"]).all() and (forecasts["patchtst"] <= forecasts["patchtst_high"]).all()
+
+
+def test_training_runs_where_patchtst_device_says_and_the_model_comes_back_to_the_cpu(monkeypatch):
+    monkeypatch.setenv("PATCHTST_DEVICE", "cpu")
+    df = make_features(days=40)
+    model = PatchTSTForecaster(epochs=1, d_model=16, hidden=32, revin=0).fit(df, windows(df.index, stride=16), epochs=1)
+    assert all(p.device.type == "cpu" for p in model.net.parameters()) and model.net.scale.device.type == "cpu"
