@@ -18,7 +18,7 @@ from tune_boosting import (
     lag_columns,
     make_model,
     seeds_for,
-    storage_for,
+    study_name,
     suggest,
     tuned_forecasts,
 )
@@ -82,8 +82,9 @@ def test_both_models_get_every_weather_and_calendar_input_plus_their_lags():
 
 
 def test_each_model_and_lookback_has_its_own_study():
-    assert storage_for("lightgbm", 7).endswith("optuna_lightgbm_7d_wide2.db")
-    assert storage_for("xgboost", 28).endswith("optuna_xgboost_28d_wide2.db")
+    assert study_name("lightgbm", 7) == "lightgbm_7d_wide2_4w"
+    assert study_name("xgboost", 28) == "xgboost_28d_wide2_4w"
+    assert study_name("lightgbm", 28) != study_name("lightgbm", 28, sampler_seed=1)
 
 
 @pytest.mark.parametrize("name", ["lightgbm", "xgboost"])
@@ -161,11 +162,10 @@ def test_settings_without_randomness_are_not_trained_again_for_other_seeds():
 def test_xgboosts_learning_rate_at_one_is_its_limit_and_lightgbms_top_is_still_an_edge():
     import optuna
 
-    from tune_boosting import natural_ends, storage_for
+    from tune_boosting import natural_ends
     from validation import edge_settings
 
     xgb = {"learning_rate": optuna.distributions.FloatDistribution(0.005, 1.0, log=True)}
     lgb = {"learning_rate": optuna.distributions.FloatDistribution(0.005, 0.5, log=True)}
     assert edge_settings({"learning_rate": 0.78}, xgb, natural_ends) == []
     assert edge_settings({"learning_rate": 0.45}, lgb, natural_ends) == [("learning_rate", 0.45, "high")]
-    assert storage_for("lightgbm", 28) != storage_for("lightgbm", 28, sampler_seed=1)

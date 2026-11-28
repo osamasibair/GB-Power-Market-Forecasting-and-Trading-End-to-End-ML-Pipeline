@@ -4,7 +4,14 @@ import optuna
 import pytest
 
 from patchtst import PatchTST, PatchTSTForecaster, defaults
-from tune_patchtst import best_settings, confirm, natural_ends, search, suggest
+from tune_patchtst import (
+    best_settings,
+    confirm,
+    lookback_comparison,
+    natural_ends,
+    search,
+    suggest,
+)
 from validation import edge_settings
 
 base = {"history_days": 14}
@@ -91,3 +98,18 @@ def test_the_widened_ranges_include_the_larger_models_and_more_dropout():
     assert (trial.distributions["layers"].low, trial.distributions["layers"].high) == (1, 5)
     assert (trial.distributions["weight_decay"].low, trial.distributions["weight_decay"].high) == (1e-4, 1.0)
     assert (trial.distributions["epochs"].low, trial.distributions["epochs"].high) == (2, 40)
+
+
+def test_every_lookback_is_trained_with_every_seed_and_ranked_by_its_loss_averaged_over_years_and_seeds():
+    seen = []
+
+    def years(df, settings):
+        seen.append((settings["history_days"], settings["seed"]))
+        loss = 300.0 - settings["history_days"] + settings["seed"]  # 42 days best; seeds move the loss
+        return [{"loss": loss, "mape": 3.0}, {"loss": loss + 10, "mape": 4.0}]
+
+    results = lookback_comparison(None, {"dropout": 0.2}, years=years)
+    assert sorted(seen) == sorted((d, s) for d in (7, 14, 21, 28, 42) for s in (42, 1, 2, 3, 4))
+    assert [r["days"] for r in results] == [42, 28, 21, 14, 7]
+    best = results[0]
+    assert best["loss_year1"] == 300.0 - 42 + 52 / 5 and best["loss"] == best["loss_year1"] + 5 and best["mape"] == 3.5

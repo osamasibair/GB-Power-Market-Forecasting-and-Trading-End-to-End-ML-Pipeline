@@ -6,23 +6,23 @@ to the year), and scored like every other model's: by the pinball loss in MW of 
 is the 50% one, as for every other model. The test year stays unseen.
 
 Both models get the same weather and calendar inputs as every other model (forecast_windows.known_inputs), with no
-selection, and read past demand through lag columns. Three steps, in this order:
-1. Lookback, for each model: how far back its lags reach, from the same options as every other model (7 to 42 days,
-   forecast_windows.lookbacks). Beyond the 7 days of lags the models had, each extra week adds the demand at the same
-   time that many weeks earlier. Default settings; the best is saved to models/<model>_lookback.json.
-       python src/tune_boosting.py --model lightgbm --check-lookback
-2. Settings: 40 optuna trials with that lookback, the same budget as the neural models. The first trial is the default
-   settings, so the gain from tuning is visible. Trials train in seconds, so they aren't pruned. The study is saved in
-   models/, so it can be stopped with Ctrl+C and resumed by running this again. Each trial uses one seed, so the best
-   three are then scored with all five seeds, as for every tuned model, and the one with the lowest average wins. Its
-   settings go to models/<model>_tuned.json, and the tuned model is then trained with five seeds. Their forecasts are
-   averaged, the 80% range is calibrated on the calibration year like every other model's, and the result is added to
-   transformer_forecasts and transformer_calibration as <model>_tuned, so run src/train_patchtst.py first.
-       python src/tune_boosting.py --model lightgbm
-3. Recheck, as for every tuned model: the lookback is compared again with the tuned settings (five seeds, since tuned
-   settings sample rows and columns). If a different lookback wins, the tuned model reads that instead and its final
-   five-seed model is trained again; the settings aren't tuned again, so it's one pass, as for every model.
-       python src/tune_boosting.py --model lightgbm --recheck-lookback
+selection, and read past demand through lag columns. One command runs all of a model's steps, in this order:
+1. Lookback: how far back its lags reach, from the same options as every other model (7 to 42 days,
+   forecast_windows.lookbacks), with the default settings. Beyond the 7 days of lags the models had, each extra week
+   adds the demand at the same time that many weeks earlier.
+2. Settings: 60 optuna trials with that lookback, the same budget as every model, run 4 at a time like every model's
+   (src/parallel.py). The first trial run is the default settings, so the gain from tuning is visible. Trials aren't
+   pruned. The study is kept in the shared database, so it can be stopped with Ctrl+C and resumed by running this again.
+3. Confirm: each trial uses one seed, so the best three are scored with all five seeds, as for every tuned model, and
+   the one with the lowest average wins.
+4. Recheck: the lookback is compared again with the tuned settings (five seeds, since tuned settings sample rows and
+   columns), and the winner is kept; the settings aren't tuned again, so it's one pass, as for every model.
+5-9. The final model, as for every model (src/final_model.py): the tuned settings trained with each of the five seeds
+   up to the calibration year and up to the test year, the forecasts averaged, the 80% range calibrated on the
+   calibration year, and the result added to transformer_forecasts and transformer_calibration as <model>_tuned.
+Every step's runs are split across the workers. Worker 0 also saves the lookback (models/<model>_lookback.json) and the
+settings (models/<model>_tuned.json).
+    python src/tune_boosting.py --model lightgbm --workers 4 --worker 0     (and --worker 1, 2, 3 at the same time)
 
 With default settings neither model has any randomness (no row or column sampling), so the lookback check trains once
 instead of once per seed: five seeds would give five identical results.
@@ -40,6 +40,7 @@ import pandas as pd
 
 from evaluate import metrics
 from forecast_windows import first_training_day, known_inputs, lookbacks
+from parallel import Board, keep_file, sampler, search, shared, storage
 from validation import before, best_so_far, edge_settings, fold_rows, folds, pinball_mw
 
 models = Path("models")
@@ -148,13 +149,16 @@ def year_scores(name, settings, columns, years, seed=42):
     return out
 
 
-def compare(name, settings, options, years):
+def compare(name, settings, options, years, board=None, tag="", worker=0, workers=1):
     """Score each option, a {label: columns} dict, on both validation years: per year and on average (which decides),
     averaged over the seeds when the settings have randomness, with the spread between seeds. Best first; on an exact
-    tie the simpler option (fewer columns) comes first."""
+    tie the simpler option (fewer columns) comes first. The runs are split across the workers (parallel.shared)."""
+    jobs = [[label, seed] for label in options for seed in seeds_for(settings)]
+    scores = shared(board, tag, jobs, lambda job: year_scores(name, settings, options[job[0]], years, job[1]), worker,
+                    workers)
     results = []
     for label, columns in options.items():
-        runs = [year_scores(name, settings, columns, years, seed) for seed in seeds_for(settings)]
+        runs = [run for job, run in zip(jobs, scores) if job[0] == label]
         losses = np.array([[year["loss"] for year in run] for run in runs])
         mapes = np.array([[year["mape"] for year in run] for run in runs])
         both = losses.mean(axis=1)
@@ -166,8 +170,8 @@ def compare(name, settings, options, years):
 
 
 # each model's study is named after the last time its ranges were widened, so a model whose ranges didn't change keeps
-# its finished trials
-search_round = {"lightgbm": "wide2", "xgboost": "wide2"}
+# its finished trials; "4w": a new study for every model when searches started running 4 trials at a time
+search_round = {"lightgbm": "wide2_4w", "xgboost": "wide2_4w"}
 # ends of a range that can't go further, so a best setting there isn't a reason to widen: a tree needs at least 2
 # leaves and 1 level, no L2 penalty is the least, rows and columns can't be sampled above all of them, and XGBoost's
 # learning rate can't go above 1 (its documented range is 0 to 1; LightGBM's has no top, so its 0.5 is still an edge)
@@ -175,72 +179,48 @@ natural_ends = {("num_leaves", "low"): 2, ("max_depth", "low"): 1, ("reg_lambda"
                 ("colsample_bytree", "high"): 1.0, ("learning_rate", "high"): 1.0}
 
 
-def storage_for(name, days, sampler_seed=42):
+def study_name(name, days, sampler_seed=42):
     """Each model and lookback gets its own study, a new one each time that model's ranges are widened, and a separate
     one for a search started from another sampler seed (to see how much the result depends on the search's luck)."""
     seed = "" if sampler_seed == 42 else f"_seed{sampler_seed}"
-    return f"sqlite:///{models / f'optuna_{name}_{days}d_{search_round[name]}{seed}.db'}"
+    return f"{name}_{days}d_{search_round[name]}{seed}"
 
 
-def tuned_forecasts(name, df, calib, test, settings, columns, calibration_start, split_date, seeds=seeds):
-    """The tuned model's forecasts and 80% range on the calibration and test years, made like every other model's:
-    trained from the first training day to the calibration year to forecast it and calibrate the range, then to the test
-    year to forecast that. Each seed's 10/50/90% forecasts are averaged; each seed's test MAPE is kept, to show the
-    spread between seeds."""
-    from train_patchtst import conformal_adjustment
+def tuned_forecasts(name, df, calib, test, settings, columns, calibration_start, split_date, seeds=seeds, board=None,
+                    tag="", worker=0, workers=1):
+    """The tuned model's forecasts and 80% range on the calibration and test years, made like every other model's
+    (src/final_model.py): each seed trained from the first training day to the calibration year to forecast it and
+    calibrate the range, then to the test year to forecast that, the runs split across the workers. Each seed's
+    10/50/90% forecasts are averaged; each seed's test MAPE is kept, to show the spread between seeds."""
+    from final_model import combine, seed_runs
 
-    early_train = df[(df.index >= first_training_day) & (df.index < calibration_start)]
-    train = df[(df.index >= first_training_day) & (df.index < split_date)]
-    early_runs = [quantile_forecasts(name, settings, columns, early_train, calib, seed) for seed in seeds]
-    final_runs = [quantile_forecasts(name, settings, columns, train, test, seed) for seed in seeds]
-    early, final = np.mean(early_runs, axis=0), np.mean(final_runs, axis=0)
-    adjustment = conformal_adjustment(calib[target].to_numpy(), early[:, 0], early[:, 2])
-    actual = test[target].to_numpy()
-    key = f"{name}_tuned"
-
-    def interval(forecast):
-        return {key: forecast[:, 1], f"{key}_low": np.minimum(forecast[:, 0] - adjustment, forecast[:, 1]),
-                f"{key}_high": np.maximum(forecast[:, 2] + adjustment, forecast[:, 1])}
-
-    return {"calibration": interval(early), "forecasts": interval(final), "adjustment": adjustment,
-            "seed_mapes": [float(metrics(actual, run[:, 1])["mape"]) for run in final_runs]}
+    fit_parts = {"calibration": df[(df.index >= first_training_day) & (df.index < calibration_start)],
+                 "test": df[(df.index >= first_training_day) & (df.index < split_date)]}
+    forecast_rows = {"calibration": calib, "test": test}
+    calibration_runs, test_runs = seed_runs(
+        lambda seed, part: quantile_forecasts(name, settings, columns, fit_parts[part], forecast_rows[part], seed),
+        seeds, board, tag, worker, workers)
+    return combine(f"{name}_tuned", calibration_runs, test_runs, calib[target].to_numpy(), test[target].to_numpy())
 
 
-def confirm(name, trials, columns, years, scores=None):
+def confirm(name, trials, columns, years, scores=None, board=None, tag="", worker=0, workers=1):
     """Score each of `trials` with every seed and return them with the loss averaged over the seeds, best first, the
     same check every tuned model gets. Each trial's own run is its seed 42 result, so only the other seeds are trained;
-    settings with no randomness give the same result for every seed, so they aren't trained again. `scores` (for tests)
-    replaces year_scores."""
+    settings with no randomness give the same result for every seed, so they aren't trained again. The runs are split
+    across the workers (parallel.shared). `scores` (for tests) replaces year_scores."""
     scores = scores or year_scores
+    by_number = {trial.number: {k: trial.params[k] for k in defaults[name]} for trial in trials}
+    jobs = [[number, seed] for number, settings in by_number.items() for seed in seeds_for(settings)[1:]]
+    runs = shared(board, tag, jobs, lambda job: float(np.mean(
+        [year["loss"] for year in scores(name, by_number[job[0]], columns, years, job[1])])), worker, workers)
     results = []
     for trial in trials:
-        settings = {k: trial.params[k] for k in defaults[name]}
-        losses = [trial.value]
-        for seed in seeds_for(settings)[1:]:
-            losses.append(float(np.mean([year["loss"] for year in scores(name, settings, columns, years, seed)])))
+        settings = by_number[trial.number]
+        losses = [trial.value] + [loss for job, loss in zip(jobs, runs) if job[0] == trial.number]
         losses += [trial.value] * (len(seeds) - len(losses))  # no randomness: every seed gives the seed 42 result
         results.append({"trial": trial, "settings": settings, "losses": losses, "mean": float(np.mean(losses)),
                         "std": float(np.std(losses, ddof=1))})
     return sorted(results, key=lambda r: r["mean"])
-
-
-def save_final(name, df, calib, test, settings, columns, calibration_start, split_date):
-    """Train the final model with five seeds, average their forecasts, calibrate the range, add it to
-    transformer_forecasts and transformer_calibration as <name>_tuned, and return its test scores and each seed's MAPE."""
-    from chronos2 import add_columns, scored
-    from db import load_table, save_table
-
-    print(f"\ntraining the tuned settings with seeds {', '.join(map(str, seeds))} and averaging their forecasts")
-    result = tuned_forecasts(name, df, calib, test, settings, columns, calibration_start, split_date)
-    forecasts_table = add_columns(load_table("transformer_forecasts"), result["forecasts"])
-    calibration_table = add_columns(load_table("transformer_calibration"), result["calibration"])
-    save_table(forecasts_table, "transformer_forecasts")
-    save_table(calibration_table, "transformer_calibration")
-    m = scored(forecasts_table, [f"{name}_tuned"])[f"{name}_tuned"]
-    spread = result["seed_mapes"]
-    print(f"{name}_tuned (5 seeds averaged): test MAPE {m['mape']:.2f}%, coverage {m['coverage']:.1f}%, "
-          f"width {m['width']:.0f} MW; single seeds {np.mean(spread):.2f}% ± {np.std(spread, ddof=1):.2f}")
-    return m, spread
 
 
 def print_comparison(title, results, label):
@@ -254,20 +234,21 @@ def print_comparison(title, results, label):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", choices=sorted(defaults), default="lightgbm")
-    parser.add_argument("--check-lookback", action="store_true", help="step 1: choose this model's lookback, then stop")
-    parser.add_argument("--recheck-lookback", action="store_true",
-                        help="step 3: compare the lookbacks again with the tuned settings, then stop")
-    parser.add_argument("--trials", type=int, default=40,
-                        help="how many finished trials to reach in total (default 40, the same budget as every model)")
+    parser.add_argument("--trials", type=int, default=60,
+                        help="how many finished trials, across all the workers (default 60, the same budget as every model)")
     parser.add_argument("--confirm", type=int, default=3,
                         help="how many of the best trials to score with every seed before choosing (default 3)")
+    parser.add_argument("--workers", type=int, default=1, help="how many workers share the runs (4 for every model)")
+    parser.add_argument("--worker", type=int, default=0, help="this worker's number, 0 to --workers - 1")
     parser.add_argument("--sampler-seed", type=int, default=42,
                         help="the seed the search starts from (default 42); another seed gets its own study")
     parser.add_argument("--search-only", action="store_true",
                         help="stop after the trials and the best loss after every 20, saving nothing else: to compare "
                              "searches started from different seeds")
     args = parser.parse_args()
-    name = args.model
+    name, worker, workers = args.model, args.worker, args.workers
+    if not 0 <= worker < workers:
+        raise SystemExit(f"--worker must be 0 to {workers - 1}")
 
     from db import load_table
     from forecast_windows import day_windows
@@ -281,55 +262,28 @@ if __name__ == "__main__":
     years = [(before(df, start), fold_rows(df, start, end)) for start, end in folds]
     span = ", ".join(f"{start} to {end} ({len(year) // 48} days)" for (start, end), (_, year) in zip(folds, years))
     print(f"validation years {span}, each forecast by a model trained from {first_training_day} to the year")
+    print(f"worker {worker} of {workers}")
     models.mkdir(exist_ok=True)
+    shared_db = storage(models / "optuna_boosting.db")
+    board = Board(models / "optuna_boosting.db", f"{name}_{search_round[name]}")
+    options = {f"{d} days": columns_for(d) for d in lookbacks}
 
-    lookback_path = models / f"{name}_lookback.json"
-
-    if args.check_lookback:
-        options = {f"{days} days": columns_for(days) for days in lookbacks}
-        results = compare(name, defaults[name], options, years)
-        print_comparison(f"{name} lookback, default settings ({len(seeds_for(defaults[name]))} run each):", results,
-                         "lookback")
-        best = int(results[0]["option"].split()[0])
-        lookback_path.write_text(json.dumps({"lookback_days": best}, indent=2) + "\n")
-        print(f"\nchosen: {best} days, saved to {lookback_path}")
-        print(f"margin over the runner-up: {results[1]['loss'] - results[0]['loss']:.1f} MW")
-        raise SystemExit
-
-    if not lookback_path.exists():
-        raise SystemExit(f"{lookback_path} not found, run python src/tune_boosting.py --model {name} --check-lookback first")
-    days = json.loads(lookback_path.read_text())["lookback_days"]
+    # 1. lookback, with the default settings
+    results = compare(name, defaults[name], options, years, board, "lookback", worker, workers)
+    print_comparison(f"1. {name} lookback, default settings ({len(seeds_for(defaults[name]))} run each):", results,
+                     "lookback")
+    days = int(results[0]["option"].split()[0])
+    print(f"\nchosen: {days} days, margin over the runner-up {results[1]['loss'] - results[0]['loss']:.1f} MW")
     columns = columns_for(days)
-    tuned_path = models / f"{name}_tuned.json"
 
-    from tracking import log_run
-
-    if args.recheck_lookback:
-        if not tuned_path.exists():
-            raise SystemExit(f"{tuned_path} not found, tune {name} first")
-        settings = json.loads(tuned_path.read_text())
-        options = {f"{d} days": columns_for(d) for d in lookbacks}
-        results = compare(name, settings, options, years)
-        print_comparison(f"{name} lookback rechecked with the tuned settings ({len(seeds_for(settings))} seeds each):",
-                         results, "lookback")
-        best_days = int(results[0]["option"].split()[0])
-        print(f"\nmargin over the runner-up: {results[1]['loss'] - results[0]['loss']:.1f} MW")
-        if best_days == days:
-            print(f"the tuned model keeps {days} days")
-            raise SystemExit
-        lookback_path.write_text(json.dumps({"lookback_days": best_days, "before_recheck": days}, indent=2) + "\n")
-        print(f"the tuned model now reads {best_days} days instead of {days}, saved to {lookback_path}")
-        save_final(name, df, calib, test, settings, columns_for(best_days), calibration_start, split_date)
-        raise SystemExit
-
-    study = optuna.create_study(study_name=name, storage=storage_for(name, days, args.sampler_seed), load_if_exists=True,
-                                direction="minimize", sampler=optuna.samplers.TPESampler(seed=args.sampler_seed))
-    # a resumed study gets a new sampler seed: the same seed would repeat the settings already tried
-    study.sampler = optuna.samplers.TPESampler(seed=args.sampler_seed + len(study.trials))
-    if not study.trials:
+    # 2. the settings: the shared search
+    study = optuna.create_study(study_name=study_name(name, days, args.sampler_seed), storage=shared_db,
+                                load_if_exists=True, direction="minimize")
+    study.sampler = sampler(study, worker, args.sampler_seed)
+    if not study.trials and worker == 0:
         study.enqueue_trial(defaults[name])
-    done_before = sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
-    print(f"{name}: lookback {days} days, tuning by the pinball loss in MW")
+    print(f"\n2. {name}: lookback {days} days, {args.trials} trials shared by {workers} worker(s), tuning by the "
+          "pinball loss in MW")
 
     def objective(trial):
         scores = year_scores(name, suggest(name, trial), columns, years)
@@ -339,53 +293,79 @@ if __name__ == "__main__":
         return float(np.mean([year["loss"] for year in scores]))
 
     try:
-        study.optimize(objective, n_trials=max(args.trials - done_before, 0))
+        done = search(study, objective, args.trials)
     except KeyboardInterrupt:
-        print("\nstopped, keeping the trials finished so far (run again to continue)")
-
-    done = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-    if not done:
-        raise SystemExit("no finished trials yet")
-    first, best = study.trials[0], study.best_trial
+        raise SystemExit("\nstopped, keeping the trials finished so far (run again to continue)")
+    first = next((t for t in done if t.params == defaults[name]), None)
     print(f"\n{len(done)} finished trials: the defaults, then the best five")
-    for trial in [first] + [t for t in sorted(done, key=lambda t: t.value) if t.number != first.number][:5]:
+    for trial in ([first] if first else []) + [t for t in sorted(done, key=lambda t: t.value) if t is not first][:5]:
         a = trial.user_attrs
-        note = "   <- default settings" if trial.number == first.number else ""
+        note = "   <- default settings" if trial is first else ""
         print(f"  trial {trial.number:>3}: {trial.value:7.1f} MW (years {a['loss_year1']:.1f}, {a['loss_year2']:.1f}), "
               f"MAPE {np.mean([a['mape_year1'], a['mape_year2']]):.2f}%  {trial.params}{note}")
-    print(f"best loss after (sampler seed {args.sampler_seed}): "
-          + ", ".join(f"{n} trials {v:.1f} MW" for n, v in best_so_far([t.value for t in done])))
+    print("best loss after: " + ", ".join(f"{n} trials {v:.1f} MW" for n, v in best_so_far([t.value for t in done])))
     if args.search_only:
         raise SystemExit
+
+    # 3. confirm the best few with every seed
     top = sorted(done, key=lambda t: t.value)[:args.confirm]
-    print(f"\nscoring the best {len(top)} trials with seeds {', '.join(map(str, seeds))}")
-    confirmed = confirm(name, top, columns, years)
+    print(f"\n3. scoring the best {len(top)} trials with seeds {', '.join(map(str, seeds))}")
+    confirmed = confirm(name, top, columns, years, board=board, tag=f"confirm|{study.study_name}", worker=worker,
+                        workers=workers)
     print(f"{'trial':>7} {'one seed':>9} {'five seeds (decides)':>24}")
     for r in confirmed:
         print(f"{r['trial'].number:>7} {r['trial'].value:>6.1f} MW {r['mean']:>14.1f} ± {r['std']:.1f} MW")
     best, settings = confirmed[0]["trial"], confirmed[0]["settings"]
-    tuned_path.write_text(json.dumps(settings, indent=2) + "\n")
-    print(f"\nbest: trial {best.number}, {confirmed[0]['mean']:.1f} MW over five seeds vs {first.value:.1f} MW with the "
-          f"defaults, saved to {tuned_path}")
+    default_loss = first.value if first else float("nan")
+    print(f"\nbest: trial {best.number}, {confirmed[0]['mean']:.1f} MW over five seeds vs {default_loss:.1f} MW with "
+          "the defaults")
     edges = edge_settings(best.params, best.distributions, natural_ends)
     print("best settings in the outer 10% of their range (widen and rerun): "
           + (", ".join(f"{n} {v:.4g} ({side})" for n, v, side in edges) if edges else "none"))
 
-    m, spread = save_final(name, df, calib, test, settings, columns, calibration_start, split_date)
+    # 4. recheck the lookback with the tuned settings
+    rechecked = compare(name, settings, options, years, board, f"recheck|{study.study_name}|{best.number}", worker,
+                        workers)
+    print_comparison(f"4. {name} lookback rechecked with the tuned settings ({len(seeds_for(settings))} seeds each):",
+                     rechecked, "lookback")
+    final_days = int(rechecked[0]["option"].split()[0])
+    print(f"\nmargin over the runner-up: {rechecked[1]['loss'] - rechecked[0]['loss']:.1f} MW; the tuned model reads "
+          f"{final_days} days" + (f" instead of {days}" if final_days != days else ""))
 
-    if len(done) >= 5:
-        import matplotlib.pyplot as plt
+    # 5-9. the final model: the ten runs split across the workers, then worker 0 saves it with the choices
+    print(f"\n5-9. training the tuned settings with seeds {', '.join(map(str, seeds))} and averaging their forecasts")
+    result = tuned_forecasts(name, df, calib, test, settings, columns_for(final_days), calibration_start, split_date,
+                             board=board, tag=f"final|{study.study_name}|{best.number}|{final_days}", worker=worker,
+                             workers=workers)
+    if worker != 0:
+        print(f"worker {worker} done: worker 0 saves the choices and the final model")
+        raise SystemExit  # finished without an error, so a command chained after this one runs
 
-        docs.mkdir(exist_ok=True)
-        ax = optuna.visualization.matplotlib.plot_param_importances(study)
-        ax.figure.set_size_inches(7, 4)
-        ax.figure.tight_layout()
-        ax.figure.savefig(docs / f"{name}_tuning.png", dpi=150, bbox_inches="tight")
-        plt.close(ax.figure)
+    from final_model import save
+    from tracking import log_run
 
-    log_run(experiment=f"demand-{name}-tuning", params={**settings, "lookback_days": days},
+    lookback_path, tuned_path = models / f"{name}_lookback.json", models / f"{name}_tuned.json"
+    lookback_path.write_text(json.dumps({"lookback_days": final_days, "before_recheck": days}, indent=2) + "\n")
+    tuned_path.write_text(json.dumps(settings, indent=2) + "\n")
+    print(f"saved {lookback_path}: {lookback_path.read_text().strip()}")
+    print(f"saved {tuned_path}: {tuned_path.read_text().strip()}")
+    keep_file(board, lookback_path)
+    keep_file(board, tuned_path)
+    m = save(f"{name}_tuned", result)
+    spread = result["seed_mapes"]
+
+    docs.mkdir(exist_ok=True)
+    import matplotlib.pyplot as plt
+
+    ax = optuna.visualization.matplotlib.plot_param_importances(study)
+    ax.figure.set_size_inches(7, 4)
+    ax.figure.tight_layout()
+    ax.figure.savefig(docs / f"{name}_tuning.png", dpi=150, bbox_inches="tight")
+    plt.close(ax.figure)
+
+    log_run(experiment=f"demand-{name}-tuning", params={**settings, "lookback_days": final_days, "workers": workers},
             metrics={"validation_loss": best.value, "validation_loss_5_seeds": confirmed[0]["mean"],
-                     "validation_loss_5_seeds_std": confirmed[0]["std"], "default_validation_loss": first.value,
+                     "validation_loss_5_seeds_std": confirmed[0]["std"], "default_validation_loss": default_loss,
                      "trials": len(done),
                      "test_mape": m["mape"], "test_coverage": m["coverage"], "test_width": m["width"],
                      "test_mape_single_seed_mean": float(np.mean(spread)),

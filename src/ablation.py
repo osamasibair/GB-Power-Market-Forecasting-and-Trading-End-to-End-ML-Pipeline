@@ -1,23 +1,11 @@
-"""Compare PatchTST's settings on the two validation years (validation.py), one setting at a time: train it once for
-each value of one setting, everything else unchanged, with several seeds, and score each run by its pinball loss in MW
-on each validation year (each year forecast by a model trained only on the data before it, for its set number of
-epochs), averaged over both years and the seeds. Results go to the transformer_ablation table (one row per setting,
-value and starting point) and to the MLflow experiment demand-patchtst-ablation. The test year is never used here.
-
-Only the lookback (history_days) is chosen here, as for every model: first with the default settings (step 1), then
-rechecked with the tuned ones (step 3). Every other setting, pooling, RevIN and lags included, is chosen in the 40
-tuning trials (src/tune_patchtst.py), the same budget as every model. Comparisons of other settings are only for the
-write-up: they show what each choice does and choose nothing.
-1. Lookback with the default settings, saved to models/patchtst_lookback.json for src/tune_patchtst.py:
-    python src/ablation.py history_days 7 14 21 28 42
-    python src/ablation.py --decide
-3. Recheck with the tuned settings: if a different lookback wins, it's saved to models/patchtst_lookback.json and
-   models/patchtst_tuned.json; the settings aren't tuned again, so it's one pass, as for every model.
-    python src/ablation.py history_days 7 14 21 28 42 --tuned
-    python src/ablation.py --decide --tuned"""
+"""Compare PatchTST's settings on the two validation years (validation.py) one at a time, for the write-up: train it once
+for each value of one setting, everything else unchanged, with several seeds, and score each run by its pinball loss in
+MW on each validation year (each year forecast by a model trained only on the data before it, for its set number of
+epochs), averaged over both years and the seeds. It chooses nothing: every PatchTST setting is chosen by
+src/tune_patchtst.py, as every model's are by its own tuning. Results go to the transformer_ablation table (one row per
+setting, value and starting point) and to the MLflow experiment demand-patchtst-ablation. The test year is never used.
+    python src/ablation.py pooling flatten mean attention --tuned"""
 import argparse
-import json
-from pathlib import Path
 
 import pandas as pd
 
@@ -25,9 +13,6 @@ from db import load_table, save_table
 from tracking import log_run
 from train_patchtst import base_settings, seeds, tuned_path
 from validation import patchtst_years
-
-lookback_path = Path("models") / "patchtst_lookback.json"
-min_seeds = len(seeds)
 
 
 def dates():
@@ -86,21 +71,6 @@ def merge(old, new):
     return pd.concat([old[~same], new], ignore_index=True)
 
 
-def decide(table, setting="history_days", tuned=False, min_seeds=min_seeds):
-    """The value of `setting` with the lowest validation loss, from runs that started from the defaults (or, with tuned,
-    from the tuned settings) with at least min_seeds seeds. Also returns the winner's margin over the runner-up and the
-    larger of their seed spreads, so a choice closer than the noise is visible."""
-    rows = table[(table["setting"] == setting) & (table["tuned"].astype(bool) == tuned) & (table["seeds"] >= min_seeds)]
-    if "validation_loss" not in rows or len(rows) < 2:
-        raise SystemExit(f"no complete comparison for {setting}: run python src/ablation.py {setting} ... "
-                         f"{'--tuned ' if tuned else ''}--seeds {' '.join(map(str, seeds))}")
-    rows = rows.sort_values("validation_loss")
-    best, second = rows.iloc[0], rows.iloc[1]
-    return parse(str(best["value"])), {"runner_up": second["value"],
-                                       "margin": second["validation_loss"] - best["validation_loss"],
-                                       "seed_spread": max(best["validation_loss_std"], second["validation_loss_std"])}
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("setting", nargs="?", help="the PatchTST setting to vary, e.g. pooling")
@@ -108,32 +78,7 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", nargs="+", type=int, default=seeds,
                         help="train once per seed and average (default 42 1 2 3 4)")
     parser.add_argument("--tuned", action="store_true", help=f"start from the settings in {tuned_path}")
-    parser.add_argument("--decide", action="store_true",
-                        help=f"choose the lookback from the saved comparison and save it to {lookback_path} (with "
-                             f"--tuned: the recheck, which also updates {tuned_path})")
     args = parser.parse_args()
-
-    if args.decide:
-        days, report = decide(load_table("transformer_ablation"), tuned=args.tuned)
-        print(f"lookback {days} days, runner-up {report['runner_up']} days, margin {report['margin']:.1f} MW, "
-              f"spread between seeds {report['seed_spread']:.1f} MW")
-        if report["margin"] < report["seed_spread"]:
-            print("closer than the spread between seeds (still decided by the average)")
-        lookback_path.parent.mkdir(exist_ok=True)
-        if not args.tuned:
-            lookback_path.write_text(json.dumps({"lookback_days": days}, indent=2) + "\n")
-            print(f"saved {days} days to {lookback_path}")
-            raise SystemExit
-        tuned = json.loads(tuned_path.read_text())
-        if tuned["history_days"] == days:
-            print(f"the tuned model keeps {days} days")
-            raise SystemExit
-        lookback_path.write_text(json.dumps({"lookback_days": days, "before_recheck": tuned["history_days"]}, indent=2)
-                                 + "\n")
-        print(f"the tuned model now reads {days} days instead of {tuned['history_days']}, saved to {lookback_path} "
-              f"and {tuned_path}")
-        tuned_path.write_text(json.dumps({**tuned, "history_days": days}, indent=2) + "\n")
-        raise SystemExit
 
     from patchtst import defaults
 
