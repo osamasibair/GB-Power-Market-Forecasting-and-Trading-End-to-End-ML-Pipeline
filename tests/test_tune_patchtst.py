@@ -92,9 +92,11 @@ def test_the_best_trials_are_chosen_by_their_loss_averaged_over_every_seed():
 def test_the_widened_ranges_include_the_larger_models_and_more_dropout():
     trial = optuna.create_study().ask()
     suggest(trial)
-    assert trial.distributions["d_model"].choices == (32, 64, 128, 256)
+    assert trial.distributions["d_model"].choices == (16, 32, 64, 128, 256)
     assert trial.distributions["hidden"].choices == (64, 128, 256, 512, 1024)
-    assert trial.distributions["patch_len"].choices == (12, 24, 48, 96)
+    assert trial.distributions["patch_len"].choices == (12, 24, 48, 96, 192)
+    assert trial.distributions["batch_size"].choices == (32, 64, 128, 256)
+    assert (trial.distributions["learning_rate"].low, trial.distributions["learning_rate"].high) == (1e-4, 5e-3)
     assert (trial.distributions["dropout"].low, trial.distributions["dropout"].high) == (0.0, 0.5)
     assert (trial.distributions["layers"].low, trial.distributions["layers"].high) == (1, 5)
     assert (trial.distributions["weight_decay"].low, trial.distributions["weight_decay"].high) == (1e-4, 1.0)
@@ -114,3 +116,15 @@ def test_every_lookback_is_trained_with_every_seed_and_ranked_by_its_loss_averag
     assert [r["days"] for r in results] == [42, 28, 21, 14, 7]
     best = results[0]
     assert best["loss_year1"] == 300.0 - 42 + 52 / 5 and best["loss"] == best["loss_year1"] + 5 and best["mape"] == 3.5
+
+
+
+def test_patches_of_192_are_the_longest_that_fit_the_shortest_lookback_so_they_are_a_natural_limit():
+    from forecast_windows import lookbacks
+
+    steps = min(lookbacks) * 48  # 7 days of half hours
+    assert (steps - 192) // 96 + 1 == 2 and 2 * 192 > steps  # 192 gives two half-overlapping patches; the next, 384, doesn't fit
+    trial = optuna.create_study().ask()
+    suggest(trial)
+    flagged = {name for name, _, _ in edge_settings({**trial.params, "patch_len": 192}, trial.distributions, natural_ends)}
+    assert "patch_len" not in flagged

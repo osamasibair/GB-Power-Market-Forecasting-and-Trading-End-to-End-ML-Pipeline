@@ -45,7 +45,13 @@ def edge_settings(params, distributions, natural=None, margin=0.1):
     of a list of choices. Such a range is widened and that model's search rerun. `natural` gives the limits a setting
     can't go past, as {(setting, "low" or "high"): limit} (no dropout, a full sample of rows): an end already at its
     limit isn't flagged. `distributions` are optuna's, from a finished trial. Returns (setting, value, "low" or "high")
-    for each setting at an edge."""
+    for each setting at an edge.
+
+    How far a flagged range is widened, the same for every model: a list of choices gets one more choice past the end
+    that was picked, the next in its own spacing (patches of 48 → 96, a hidden size of 512 → 1024); a range of numbers
+    goes to the next round number past that end on a 1-2-5 scale (... 0.1, 0.2, 0.5, 1, 2, 5 ...), or to the setting's
+    natural limit if it has one (a learning rate of 0.003 → 0.005; XGBoost's learning rate → 1.0, its own limit). The
+    amount is set from the range alone, before the rerun, and every widening is listed in the decision log."""
     import math
 
     natural = natural or {}
