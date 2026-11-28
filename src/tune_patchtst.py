@@ -30,7 +30,7 @@ from ablation import lookback_path, seeds
 from db import load_table
 from tracking import log_run
 from train_patchtst import models, tuned_path
-from validation import edge_settings, patchtst_years
+from validation import best_so_far, edge_settings, patchtst_years
 
 docs = Path("docs")
 # a new study each time the search changes: earlier trials searched different ranges, were stopped early, used early
@@ -153,6 +153,7 @@ if __name__ == "__main__":
         print(describe(study.trials[0]) + "   <- defaults")
     for trial in sorted(done, key=lambda t: t.value)[:5]:
         print(describe(trial))
+    print("best loss after: " + ", ".join(f"{n} trials {v:.1f} MW" for n, v in best_so_far([t.value for t in done])))
 
     top = sorted(done, key=lambda t: t.value)[:args.confirm]
     print(f"\ntraining the best {len(top)} trials with seeds {', '.join(map(str, seeds))}")

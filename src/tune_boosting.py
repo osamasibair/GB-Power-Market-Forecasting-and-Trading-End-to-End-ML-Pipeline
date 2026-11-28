@@ -40,7 +40,7 @@ import pandas as pd
 
 from evaluate import metrics
 from forecast_windows import first_training_day, known_inputs, lookbacks
-from validation import before, edge_settings, fold_rows, folds, pinball_mw
+from validation import before, best_so_far, edge_settings, fold_rows, folds, pinball_mw
 
 models = Path("models")
 docs = Path("docs")
@@ -169,14 +169,17 @@ def compare(name, settings, options, years):
 # its finished trials
 search_round = {"lightgbm": "wide2", "xgboost": "wide2"}
 # ends of a range that can't go further, so a best setting there isn't a reason to widen: a tree needs at least 2
-# leaves and 1 level, no L2 penalty is the least, and rows and columns can't be sampled above all of them
+# leaves and 1 level, no L2 penalty is the least, rows and columns can't be sampled above all of them, and XGBoost's
+# learning rate can't go above 1 (its documented range is 0 to 1; LightGBM's has no top, so its 0.5 is still an edge)
 natural_ends = {("num_leaves", "low"): 2, ("max_depth", "low"): 1, ("reg_lambda", "low"): 0.0, ("subsample", "high"): 1.0,
-                ("colsample_bytree", "high"): 1.0}
+                ("colsample_bytree", "high"): 1.0, ("learning_rate", "high"): 1.0}
 
 
-def storage_for(name, days):
-    """Each model and lookback gets its own study, a new one each time that model's ranges are widened."""
-    return f"sqlite:///{models / f'optuna_{name}_{days}d_{search_round[name]}.db'}"
+def storage_for(name, days, sampler_seed=42):
+    """Each model and lookback gets its own study, a new one each time that model's ranges are widened, and a separate
+    one for a search started from another sampler seed (to see how much the result depends on the search's luck)."""
+    seed = "" if sampler_seed == 42 else f"_seed{sampler_seed}"
+    return f"sqlite:///{models / f'optuna_{name}_{days}d_{search_round[name]}{seed}.db'}"
 
 
 def tuned_forecasts(name, df, calib, test, settings, columns, calibration_start, split_date, seeds=seeds):
@@ -258,6 +261,11 @@ if __name__ == "__main__":
                         help="how many finished trials to reach in total (default 40, the same budget as every model)")
     parser.add_argument("--confirm", type=int, default=3,
                         help="how many of the best trials to score with every seed before choosing (default 3)")
+    parser.add_argument("--sampler-seed", type=int, default=42,
+                        help="the seed the search starts from (default 42); another seed gets its own study")
+    parser.add_argument("--search-only", action="store_true",
+                        help="stop after the trials and the best loss after every 20, saving nothing else: to compare "
+                             "searches started from different seeds")
     args = parser.parse_args()
     name = args.model
 
@@ -314,10 +322,10 @@ if __name__ == "__main__":
         save_final(name, df, calib, test, settings, columns_for(best_days), calibration_start, split_date)
         raise SystemExit
 
-    study = optuna.create_study(study_name=name, storage=storage_for(name, days), load_if_exists=True,
-                                direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+    study = optuna.create_study(study_name=name, storage=storage_for(name, days, args.sampler_seed), load_if_exists=True,
+                                direction="minimize", sampler=optuna.samplers.TPESampler(seed=args.sampler_seed))
     # a resumed study gets a new sampler seed: the same seed would repeat the settings already tried
-    study.sampler = optuna.samplers.TPESampler(seed=42 + len(study.trials))
+    study.sampler = optuna.samplers.TPESampler(seed=args.sampler_seed + len(study.trials))
     if not study.trials:
         study.enqueue_trial(defaults[name])
     done_before = sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
@@ -345,6 +353,10 @@ if __name__ == "__main__":
         note = "   <- default settings" if trial.number == first.number else ""
         print(f"  trial {trial.number:>3}: {trial.value:7.1f} MW (years {a['loss_year1']:.1f}, {a['loss_year2']:.1f}), "
               f"MAPE {np.mean([a['mape_year1'], a['mape_year2']]):.2f}%  {trial.params}{note}")
+    print(f"best loss after (sampler seed {args.sampler_seed}): "
+          + ", ".join(f"{n} trials {v:.1f} MW" for n, v in best_so_far([t.value for t in done])))
+    if args.search_only:
+        raise SystemExit
     top = sorted(done, key=lambda t: t.value)[:args.confirm]
     print(f"\nscoring the best {len(top)} trials with seeds {', '.join(map(str, seeds))}")
     confirmed = confirm(name, top, columns, years)

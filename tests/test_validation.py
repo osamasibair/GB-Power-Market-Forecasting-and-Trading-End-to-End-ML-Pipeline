@@ -108,3 +108,11 @@ def test_the_year_being_scored_is_never_used_to_choose_when_to_stop_training(mon
     monkeypatch.setattr(patchtst.PatchTSTForecaster, "fit", fit)
     validation.patchtst_years(df, {"epochs": 2, "d_model": 16, "hidden": 32, "train_stride": 16})
     assert calls == [{"epochs": 2}]  # no validation windows passed in, so nothing is picked from the scored year
+
+
+def test_the_best_so_far_is_the_lowest_loss_among_the_first_trials_up_to_each_checkpoint():
+    from validation import best_so_far
+
+    values = [300.0, 310.0, 295.0] + [299.0] * 37 + [290.0] + [299.0] * 10
+    assert best_so_far(values) == [(20, 295.0), (40, 295.0)]
+    assert best_so_far(values, checkpoints=(20, 41)) == [(20, 295.0), (41, 290.0)]

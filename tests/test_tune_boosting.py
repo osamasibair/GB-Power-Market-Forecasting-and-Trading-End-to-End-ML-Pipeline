@@ -156,3 +156,16 @@ def test_settings_without_randomness_are_not_trained_again_for_other_seeds():
     fixed = SimpleNamespace(number=0, value=300.0, params=defaults["xgboost"])
     results = confirm("xgboost", [fixed], [], [], lambda *a: pytest.fail("trained again"))
     assert results[0]["losses"] == [300.0] * 5 and results[0]["std"] == 0
+
+
+def test_xgboosts_learning_rate_at_one_is_its_limit_and_lightgbms_top_is_still_an_edge():
+    import optuna
+
+    from tune_boosting import natural_ends, storage_for
+    from validation import edge_settings
+
+    xgb = {"learning_rate": optuna.distributions.FloatDistribution(0.005, 1.0, log=True)}
+    lgb = {"learning_rate": optuna.distributions.FloatDistribution(0.005, 0.5, log=True)}
+    assert edge_settings({"learning_rate": 0.78}, xgb, natural_ends) == []
+    assert edge_settings({"learning_rate": 0.45}, lgb, natural_ends) == [("learning_rate", 0.45, "high")]
+    assert storage_for("lightgbm", 28) != storage_for("lightgbm", 28, sampler_seed=1)

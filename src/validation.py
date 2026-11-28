@@ -33,6 +33,12 @@ def pinball_mw(actual, predicted, quantiles):
     return float(np.maximum(q * error, (q - 1) * error).mean())
 
 
+def best_so_far(values, checkpoints=(20, 40, 60, 80, 100)):
+    """The best (lowest) loss among the first n trials, for each n in checkpoints the search has reached: how far the
+    search was from its final best after fewer trials, to see how many trials it needs."""
+    return [(n, min(values[:n])) for n in checkpoints if n <= len(values)]
+
+
 def edge_settings(params, distributions, natural=None, margin=0.1):
     """The rule every model's search follows, applied the same way to each: the best settings `params` that lie in the
     outer `margin` (10%) of their search range, measured on the scale searched (log or linear), or at the first or last
