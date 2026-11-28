@@ -21,8 +21,9 @@ Every trial runs in full, as every other model's do: none is stopped early for l
 first trial run is the default settings, so the gain from tuning is visible. The study is kept in the shared database,
 so it can be stopped with Ctrl+C and resumed by running this again. The rule, the same for every model
 (validation.edge_settings): a range whose best setting comes out in its outer 10% is widened and the search rerun.
-Widened twice: after the first search (the largest model sizes, dropout near its top) and the second (the most layers,
-weight decay near its top).
+Widened three times: after the first search (the largest model sizes, dropout near its top), the second (the most
+layers, weight decay near its top) and the third, the first run 4 trials at a time (the longest patches and the largest
+hidden size), each time by one more step of the range's own spacing.
     PATCHTST_DEVICE=cuda python src/tune_patchtst.py --workers 4 --worker 0     (and --worker 1, 2, 3 at the same time)"""
 import argparse
 import json
@@ -42,8 +43,9 @@ from validation import best_so_far, edge_settings, patchtst_years
 docs = Path("docs")
 lookback_path = models / "patchtst_lookback.json"
 # a new study each time the search changes: earlier ones searched different ranges, were stopped early, used early
-# stopping on the year being scored, didn't search the head, RevIN and lags, or ran one trial at a time
-search_round = "all_4w"
+# stopping on the year being scored, didn't search the head, RevIN and lags, ran one trial at a time, or (all_4w) didn't
+# offer patches of 96 or a hidden size of 1024
+search_round = "wide3_4w"
 warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
 search = ["pooling", "revin", "lags", "learning_rate", "weight_decay", "dropout", "d_model", "layers", "hidden",
           "patch_len", "batch_size", "epochs"]
@@ -56,7 +58,7 @@ natural_ends = {("dropout", "low"): 0.0, ("layers", "low"): 1, ("weight_decay", 
 
 def suggest(trial):
     """The settings to try in this trial. Patches always overlap by half, as in the defaults."""
-    patch_len = trial.suggest_categorical("patch_len", [12, 24, 48])
+    patch_len = trial.suggest_categorical("patch_len", [12, 24, 48, 96])
     return {
         "pooling": trial.suggest_categorical("pooling", ["flatten", "mean", "attention"]),
         "revin": trial.suggest_categorical("revin", [0, 1]),
@@ -66,7 +68,7 @@ def suggest(trial):
         "dropout": trial.suggest_float("dropout", 0.0, 0.5),
         "d_model": trial.suggest_categorical("d_model", [32, 64, 128, 256]),
         "layers": trial.suggest_int("layers", 1, 5),
-        "hidden": trial.suggest_categorical("hidden", [64, 128, 256, 512]),
+        "hidden": trial.suggest_categorical("hidden", [64, 128, 256, 512, 1024]),
         "patch_len": patch_len,
         "stride": patch_len // 2,
         "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256]),
