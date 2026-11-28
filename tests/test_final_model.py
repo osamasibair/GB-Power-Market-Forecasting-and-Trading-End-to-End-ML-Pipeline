@@ -34,3 +34,5 @@ def test_the_seeds_are_averaged_and_the_range_is_calibrated_to_80_percent_and_ne
         r = result[part]
         assert (r["m_tuned_low"] <= r["m_tuned"]).all() and (r["m_tuned"] <= r["m_tuned_high"]).all()
     assert len(result["seed_mapes"]) == 3
+    assert result["calibration_coverage"] == inside.mean() * 100 and result["calibration_coverage_before"] < 80
+    assert result["adjustment"] > 0  # the raw range held too little, so it was widened

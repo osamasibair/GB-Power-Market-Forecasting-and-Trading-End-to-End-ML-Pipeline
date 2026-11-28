@@ -36,8 +36,9 @@ def seed_runs(train_and_forecast, seeds, board=None, tag="", worker=0, workers=1
 
 def combine(key, calibration_runs, test_runs, actual_calibration, actual_test):
     """The seeds' forecasts averaged, with the 80% range calibrated on the calibration year (conformal: widened or
-    narrowed until 80% of the actual demand falls inside it), never past the median, for both years; and each seed's
-    test MAPE, to show the spread between seeds."""
+    narrowed until 80% of the actual demand falls inside it), never past the median, for both years; the share of the
+    calibration year inside the range before and after calibrating; and each seed's test MAPE, to show the spread
+    between seeds."""
     from evaluate import metrics
     from train_patchtst import conformal_adjustment
 
@@ -48,7 +49,13 @@ def combine(key, calibration_runs, test_runs, actual_calibration, actual_test):
         return {key: forecast[:, 1], f"{key}_low": np.minimum(forecast[:, 0] - adjustment, forecast[:, 1]),
                 f"{key}_high": np.maximum(forecast[:, 2] + adjustment, forecast[:, 1])}
 
-    return {"calibration": interval(early), "forecasts": interval(final), "adjustment": adjustment,
+    def inside(low, high):
+        return float(((actual_calibration >= low) & (actual_calibration <= high)).mean() * 100)
+
+    calibration = interval(early)
+    return {"calibration": calibration, "forecasts": interval(final), "adjustment": adjustment,
+            "calibration_coverage_before": inside(early[:, 0], early[:, 2]),
+            "calibration_coverage": inside(calibration[f"{key}_low"], calibration[f"{key}_high"]),
             "seed_mapes": [float(metrics(actual_test, run[:, 1])["mape"]) for run in test_runs]}
 
 
@@ -73,7 +80,13 @@ def save(key, result):
             if engine.dialect.name == "postgresql":
                 lock.execute(text("SELECT pg_advisory_unlock(424242)"))
     m = scored(forecasts_table, [key])[key]
-    spread = result["seed_mapes"]
-    print(f"{key} ({len(spread)} seeds averaged): test MAPE {m['mape']:.2f}%, coverage {m['coverage']:.1f}%, "
-          f"width {m['width']:.0f} MW; single seeds {np.mean(spread):.2f}% ± {np.std(spread, ddof=1):.2f}")
+    spread, adjustment = result["seed_mapes"], result["adjustment"]
+    print(f"5. trained with {len(spread)} seeds, each up to the calibration year and up to the test year")
+    print(f"6. seeds averaged: test MAPE {m['mape']:.2f}% (single seeds {np.mean(spread):.2f}% ± "
+          f"{np.std(spread, ddof=1):.2f})")
+    print(f"7. 80% range calibrated on the calibration year: {result['calibration_coverage_before']:.1f}% inside "
+          f"before, {'widened' if adjustment >= 0 else 'narrowed'} by {abs(adjustment):.0f} MW at each end, "
+          f"{result['calibration_coverage']:.1f}% inside after (never past the median)")
+    print(f"8. applied to the test year: coverage {m['coverage']:.1f}%, width {m['width']:.0f} MW")
+    print(f"9. saved as {key} in transformer_forecasts and transformer_calibration")
     return m
